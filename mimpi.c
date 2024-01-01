@@ -25,6 +25,18 @@ void MIMPI_Init(bool enable_deadlock_detection) {
         exit(EXIT_FAILURE);
     }
 
+    // int start_channel = (WORLD_RANK - 1) * (WORLD_SIZE - 1);
+    // for (int j = 1; j <= WORLD_SIZE; j++) {
+    //     if (WORLD_RANK != j) { // Pominięcie kanałów między tym samym procesem
+    //         int channel_index = start_channel + ((WORLD_RANK < j) ? (j - 1) : j);
+    //         if (WORLD_RANK == 1) {
+    //             printf("Closing pipe in %d, %d, %d\n", WORLD_RANK, j, channel_index);
+    //         }
+    //         close(channels[channel_index][0]);
+    //         close(channels[channel_index][1]);
+    //     }
+    // }
+
     // if (!enable_deadlock_detection) {
     //     // Brak wykrywania zakleszczeń
     // } else {
