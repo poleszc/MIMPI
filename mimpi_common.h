@@ -47,7 +47,8 @@ _Noreturn extern void fatal(const char* fmt, ...);
 
 /////////////////////////////////////////////
 // Put your declarations here
-
+static int WORLD_SIZE;
+static int WORLD_RANK;
 
 
 
