@@ -7,15 +7,22 @@
 #include "mimpi_common.h"
 
 #include <stdio.h>
+#include <stdbool.h>
 #include <stdlib.h>
+
+static bool DEADLOCK_DETECTION;
+static int WORLD_SIZE;
+static int WORLD_RANK;
+int write_descriptors[MAX_PROCESSES + 1];
+int read_descriptors[MAX_PROCESSES + 1];
 
 void MIMPI_Init(bool enable_deadlock_detection) {
     channels_init();
-    // Tutaj inicjalizacja 'zasobow' potrzebnych do synchronizacji procesow
 
-    //Tutaj trzeba zainicjalizowac worldran i world size
-    const char* world_size_env = getenv("MIMPI_WORLD_SIZE");     
-    const char* world_rank_env = getenv("MIMPI_WORLD_RANK");     
+    DEADLOCK_DETECTION = enable_deadlock_detection;
+    // Inicjalizujemy World Size i World Rank
+    const char *world_size_env = getenv("MIMPI_WORLD_SIZE");
+    const char *world_rank_env = getenv("MIMPI_WORLD_RANK");
 
     if (world_rank_env != NULL && world_size_env != NULL) {
         WORLD_SIZE = atoi(world_size_env);
@@ -25,41 +32,52 @@ void MIMPI_Init(bool enable_deadlock_detection) {
         exit(EXIT_FAILURE);
     }
 
-    // int start_channel = (WORLD_RANK - 1) * (WORLD_SIZE - 1);
-    // for (int j = 1; j <= WORLD_SIZE; j++) {
-    //     if (WORLD_RANK != j) { // Pominięcie kanałów między tym samym procesem
-    //         int channel_index = start_channel + ((WORLD_RANK < j) ? (j - 1) : j);
-    //         if (WORLD_RANK == 1) {
-    //             printf("Closing pipe in %d, %d, %d\n", WORLD_RANK, j, channel_index);
-    //         }
-    //         close(channels[channel_index][0]);
-    //         close(channels[channel_index][1]);
-    //     }
-    // }
+    // Inicjalizujemy tablice deskryptorów
+    for (int i = 1; i <= MAX_PROCESSES; i++) {
+        if (i != WORLD_RANK) {
+            char write_descriptor[32];
+            snprintf(write_descriptor, sizeof(write_descriptor),
+                    "MIMPI_CHANNEL_WRITE_%d_%d", WORLD_RANK, i);
+            char read_descriptor[32];
+            snprintf(read_descriptor, sizeof(read_descriptor),
+                    "MIMPI_CHANNEL_READ_%d_%d", WORLD_RANK, i);
 
-    // if (!enable_deadlock_detection) {
-    //     // Brak wykrywania zakleszczeń
-    // } else {
-    //     // Wykrywanie zakleszczeń włączone
-    // }
+            write_descriptor[i] = atoi(getenv(write_descriptor));
+            read_descriptor[i] = atoi(getenv(read_descriptor));
+        }
+    }
 }
 
 void MIMPI_Finalize() {
-    // Tutaj usuwamy wszystkie zasoby używane przez program(otwarte pliku,
-    // kanały, zaalokowana pamięć i prymitywy synchronizacyjne xd)
+    // Zamykamy nie potrzebne deskrytptory
+    for (int i = 1; i <= MAX_PROCESSES; i++) {
+        close(write_descriptors[i]);
+        close(read_descriptors[i]);
+    }
+
     unsetenv("MIMPI_WORLD_SIZE");
     unsetenv("MIMPI_WORLD_RANK");
+
+    // Zwalniamy zmienne środowiskowe do przekazania deskryptorów
+    for (int i = 0; i < MAX_PROCESSES; i++) {
+        if (i != WORLD_RANK) {
+            char write_descriptor[32];
+            snprintf(write_descriptor, sizeof(write_descriptor),
+                    "MIMPI_CHANNEL_WRITE_%d_%d", WORLD_RANK, i);
+            char read_descriptor[32];
+            snprintf(read_descriptor, sizeof(read_descriptor),
+                    "MIMPI_CHANNEL_READ_%d_%d", WORLD_RANK, i);
+            unsetenv(write_descriptor);
+            unsetenv(read_descriptor);
+        }
+    }
 
     channels_finalize();
 }
 
-int MIMPI_World_size() {
-    return WORLD_SIZE;
-}
+int MIMPI_World_size() { return WORLD_SIZE; }
 
-int MIMPI_World_rank(){
-    return WORLD_RANK;
-}
+int MIMPI_World_rank() { return WORLD_RANK; }
 
 MIMPI_Retcode MIMPI_Send(void const *data, int count, int destination, int tag){
     TODO
@@ -92,27 +110,28 @@ MIMPI_Retcode MIMPI_Send(void const *data, int count, int destination, int tag){
 
 }
 
-MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
+MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag){
     TODO
     // Czyka na wiadomość o wielkosci count i znaczniku tag od procesu o randze
     // rank(zapisanej w source)
     // Zapisuje ta wiadomość pod adresem data, nie musimy martwic się ze cos tam
     // nadpiszemy, bo to wołający ma to ogarnac
 
-    // Wywołanie jest BLOKUJACE czyli konczy sie dopiero jak uzyskamy cala wiadomosc
-    // Moze do tego jaka tablica semaforow procesoe oczekajacych na wiadomosc, bo jest ich tylko 16
-    // Jezeli proces wychodzi z mimpi to musi powiedziec procesom ktore czekamy na wiadomosc od niego 
-    // ze wychodzi, bo to moze zakonczyc je błędem.
+    // Wywołanie jest BLOKUJACE czyli konczy sie dopiero jak uzyskamy cala
+    // wiadomosc Moze do tego jaka tablica semaforow procesoe oczekajacych na
+    // wiadomosc, bo jest ich tylko 16 Jezeli proces wychodzi z mimpi to musi
+    // powiedziec procesom ktore czekamy na wiadomosc od niego ze wychodzi, bo
+    // to moze zakonczyc je błędem.
 
     // Wersja 1:
-    // Jeden proces wysyła komunikaty w tkaiej kolejnsci w jakiej odbiorce chce je odebrac
-    // Tzn jezeli wysyłamy z 0 do 1 to nie moze byc tak ze 0 wysyła tag1 a potem tag0,
-    // a 1 odbiera tag0 a potem tag1
-    // Jest tez ograniczenie na wielkosc wiadomosci <512 bajtow, bo pewnie ten zjebany channel tylko tyle wysle
+    // Jeden proces wysyła komunikaty w tkaiej kolejnsci w jakiej odbiorce chce
+    // je odebrac Tzn jezeli wysyłamy z 0 do 1 to nie moze byc tak ze 0 wysyła
+    // tag1 a potem tag0, a 1 odbiera tag0 a potem tag1 Jest tez ograniczenie na
+    // wielkosc wiadomosci <512 bajtow, bo pewnie ten zjebany channel tylko tyle
+    // wysle
 
     // Wersja 2:
     // Nie mozna nic założyc o kolejnosci wysłanych pakietów
-
 
     /*
     if (source didnt send any message and left the mpi block ||
@@ -126,16 +145,17 @@ MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
 
 MIMPI_Retcode MIMPI_Barrier(){
     TODO
-    // Przeprowadza synchronizacje wszystkich procesów? Czyli pewnie działa tak jak zwykła barriera
+    // Przeprowadza synchronizacje wszystkich procesów? Czyli pewnie działa tak
+    // jak zwykła barriera
 }
 
 MIMPI_Retcode MIMPI_Bcast(void *data, int count, int root){
     TODO
-    // Wysyła dane zapewnione przez proces o randze root do WSZSYTKICH pozostałych procesow
+    // Wysyła dane zapewnione przez proces o randze root do WSZSYTKICH
+    // pozostałych procesow
 }
 
 MIMPI_Retcode MIMPI_Reduce(void const *send_data, void *recv_data, int count,
                            MIMPI_Op op, int root) {
     TODO
-    
 }

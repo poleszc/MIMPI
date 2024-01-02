@@ -10,6 +10,8 @@
 #include <stdbool.h>
 #include <stdnoreturn.h>
 
+#define MAX_PROCESSES 16
+
 /*
     Assert that expression doesn't evaluate to -1 (as almost every system function does in case of error).
 
@@ -46,8 +48,6 @@ _Noreturn extern void fatal(const char* fmt, ...);
 
 
 /////////////////////////////////////////////
-static int WORLD_SIZE;
-static int WORLD_RANK;
 
 
 
