@@ -92,10 +92,10 @@ int main(int argc, char *argv[]) {
                 if (i != j && descriptor_count < 15) {
                     char write_descriptor[32];
                     snprintf(write_descriptor, sizeof(write_descriptor),
-                             "MIMPI_CHANNEL_WRITE_%d", j + 1);
+                             "MIMPI_CHANNEL_WRITE_%d", j);
                     char read_descriptor[32];
                     snprintf(read_descriptor, sizeof(read_descriptor),
-                             "MIMPI_CHANNEL_READ_%d", j + 1);
+                             "MIMPI_CHANNEL_READ_%d", j);
 
                     char write_desc[8], read_desc[8];
                     snprintf(write_desc, sizeof(write_desc), "%d",
