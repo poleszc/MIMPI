@@ -53,7 +53,9 @@ int main(int argc, char *argv[]) {
     int channels[MAX_PROCESSES][MAX_PROCESSES][2];
     for (int i = 0; i < n; i++) {
         for (int j = 0; j < n; j++) {
-            ASSERT_SYS_OK(channel(channels[i][j]));
+            if (i != j) {
+                ASSERT_SYS_OK(channel(channels[i][j]));
+            }
         }
     }
 
@@ -73,20 +75,20 @@ int main(int argc, char *argv[]) {
         ASSERT_SYS_OK(close(tempDescriptors[i]));
     }
 
-    char *prog = argv[2];   // nazwa prog
-    char **args = &argv[3]; // dodatkowe argumenty do prog
+    char *prog = argv[2];         // nazwa prog
+    char **args = &argv[3];       // dodatkowe argumenty do prog
     for (int i = 0; i < n; i++) { // Odpalamy n procesow
         pid_t pid;
         ASSERT_SYS_OK(pid = fork());
         if (pid == 0) { // Proces potomny
             // Ustawiamy zmienna oznaczająca indeks programu
             char index_arg[3];
-            snprintf(index_arg, sizeof(index_arg), "%d", i + 1);
+            snprintf(index_arg, sizeof(index_arg), "%d", i);
             setenv("MIMPI_WORLD_RANK", index_arg, 1);
 
             // Przekazujemy dekstyptory do czytania i pisania do programu
             int descriptor_count = 0;
-            for (int j = 0; j < n; ++j) {
+            for (int j = 0; j < n; j++) {
                 if (i != j && descriptor_count < 15) {
                     char write_descriptor[32];
                     snprintf(write_descriptor, sizeof(write_descriptor),
@@ -106,7 +108,7 @@ int main(int argc, char *argv[]) {
                     descriptor_count++;
                 }
             }
-            
+
             ASSERT_SYS_OK(execvp(prog, args));
         }
     }

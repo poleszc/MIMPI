@@ -9,8 +9,8 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
-
-extern char **environ;
+#include <sys/types.h>
+#include <unistd.h>
 
 static bool DEADLOCK_DETECTION;
 static int WORLD_SIZE;
@@ -18,6 +18,23 @@ static int WORLD_RANK;
 int write_descriptors[MAX_PROCESSES + 1];
 int read_descriptors[MAX_PROCESSES + 1];
 
+void printMyDesc() {
+    printf(
+        "================================================================\n");
+    printf("WRITE DESCRIPTORS\n");
+    for (int i = 0; i < WORLD_SIZE; i++) {
+        printf("%d | ", write_descriptors[i]);
+    }
+    printf("\n");
+    printf("READ DESCRIPTORS\n");
+    for (int i = 0; i < WORLD_SIZE; i++) {
+        printf("%d | ", read_descriptors[i]);
+    }
+    printf("\n");
+
+    printf(
+        "================================================================\n");
+}
 
 void MIMPI_Init(bool enable_deadlock_detection) {
     channels_init();
@@ -36,7 +53,7 @@ void MIMPI_Init(bool enable_deadlock_detection) {
     }
 
     // Inicjalizujemy tablice deskryptorów
-    for (int i = 1; i <= MAX_PROCESSES; i++) {
+    for (int i = 0; i < MAX_PROCESSES; i++) {
         if (i != WORLD_RANK) {
             char write_descriptor[32];
             snprintf(write_descriptor, sizeof(write_descriptor),
@@ -45,38 +62,43 @@ void MIMPI_Init(bool enable_deadlock_detection) {
             snprintf(read_descriptor, sizeof(read_descriptor),
                      "MIMPI_CHANNEL_READ_%d", i);
 
-            char* temp1 = getenv(write_descriptor);
-            char* temp2 = getenv(read_descriptor);
+            char *temp1 = getenv(write_descriptor);
+            char *temp2 = getenv(read_descriptor);
 
             if (temp1 && temp2) {
                 write_descriptors[i] = atoi(temp1);
                 read_descriptors[i] = atoi(temp2);
                 if (WORLD_RANK == 1)
-                    printf("Ith: %d, %d\n", write_descriptors[i], read_descriptors[i]);
+                    printf("Ith: %d, %d\n", write_descriptors[i],
+                           read_descriptors[i]);
             }
-            
         }
     }
 
-    printf("Tablica desk\n");
-    printf("Pisanie\n");
-    for (int i = 0; i <= WORLD_SIZE; i++) {
-        printf("%d | ", write_descriptors[i]);
+    if (WORLD_RANK == 1 || WORLD_RANK == 0) {
+        printf("WORLD_RANK: %d\n", WORLD_RANK);
+        printf("WRITE DESCRIPTORS\n");
+        for (int i = 0; i < WORLD_SIZE; i++) {
+            printf("%d | ", write_descriptors[i]);
+        }
+        printf("\n");
+        printf("READ DESCRIPTORS\n");
+        for (int i = 0; i < WORLD_SIZE; i++) {
+            printf("%d | ", read_descriptors[i]);
+        }
+        printf("\n");
+        printMyDesc();
     }
-    printf("\nCzytanie\n");
-    for (int i = 0; i <= WORLD_SIZE; i++) {
-        printf("%d | ", read_descriptors[i]);
-    }
-    printf("\n");
-    sleep(1);
 }
 
 void MIMPI_Finalize() {
     // Zamykamy nie potrzebne deskrytptory
-    // for (int i = 1; i <= MAX_PROCESSES; i++) {
-    //     close(write_descriptors[i]);
-    //     close(read_descriptors[i]);
-    // }
+    for (int i = 0; i <= WORLD_SIZE; i++) {
+        if (i != WORLD_RANK) {
+            close(write_descriptors[i]);
+            close(read_descriptors[i]);
+        }
+    }
 
     unsetenv("MIMPI_WORLD_SIZE");
     unsetenv("MIMPI_WORLD_RANK");
@@ -102,20 +124,28 @@ int MIMPI_World_size() { return WORLD_SIZE; }
 
 int MIMPI_World_rank() { return WORLD_RANK; }
 
-MIMPI_Retcode MIMPI_Send(void const *data, int count, int destination, int tag){
-    TODO
-    // Wysyła dane z adresu data interpretujac je jako tablice bajtow wielkosci
-    // count do procesu o randze destination.
-    // Dodatkowo ta wiadomość jest oznaczana znacznikiem tag, który pozwala na
-    // odbiór wiadomosci
+MIMPI_Retcode MIMPI_Send(void const *data, int count, int destination,
+                         int tag) {
 
     // Jezeli wchodzimy tu i chcemy wysłać wiadomość do procesu do destination
     // ktory juz nie istnieje bo wyszedl z bloku MPI to zwracamy
     // MIMPI_ERROR_REMOTE_FINISHED Chyba tu nie zwracamy MIMPI_DEADLOCK_DETECTED
 
-    // Wysylanie tej wiadomosci pewnie powinno byc robione jako tworzenie chanel
-    // miedzy procesami i wpisanie tej wiadomosci do pliku i czekanie na jej
-    // odbior przez przyjmujacego
+    if (destination < 0 || destination > WORLD_SIZE) {
+        return MIMPI_ERROR_NO_SUCH_RANK;
+    } else if (destination == WORLD_RANK) {
+        return MIMPI_ERROR_ATTEMPTED_SELF_OP;
+    } else {
+        printf("Sending data to %d via %d\n", destination,
+               write_descriptors[destination]);
+        ssize_t wrote = chsend(write_descriptors[destination], data, count);
+        ASSERT_SYS_OK(wrote);
+        if (wrote != count)
+            fatal("Wrote less than expected: %zd out of %zu bytes.", wrote,
+                  count);
+
+        return MIMPI_SUCCESS;
+    }
 
     /*
     if (destination == MIMPI_World_rank()) {
@@ -130,11 +160,9 @@ MIMPI_Retcode MIMPI_Send(void const *data, int count, int destination, int tag){
 
     return MIMPI_SUCCESS;
     */
-
 }
 
-MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag){
-    TODO
+MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
     // Czyka na wiadomość o wielkosci count i znaczniku tag od procesu o randze
     // rank(zapisanej w source)
     // Zapisuje ta wiadomość pod adresem data, nie musimy martwic się ze cos tam
@@ -155,6 +183,22 @@ MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag){
 
     // Wersja 2:
     // Nie mozna nic założyc o kolejnosci wysłanych pakietów
+
+    if (source < 0 || source > WORLD_SIZE) {
+        return MIMPI_ERROR_NO_SUCH_RANK;
+    } else if (source == WORLD_RANK) {
+        return MIMPI_ERROR_ATTEMPTED_SELF_OP;
+    } else {
+        printf("Recieving data from %d via %d\n", source,
+               read_descriptors[source]);
+        ssize_t read = chrecv(read_descriptors[source], data, count);
+        ASSERT_SYS_OK(read);
+        if (read < count) {
+            fatal("Read less than expected: %zd out of %zu bytes.", read,
+                  count);
+        }
+        return MIMPI_SUCCESS;
+    }
 
     /*
     if (source didnt send any message and left the mpi block ||
