@@ -6,15 +6,18 @@
 #include "channel.h"
 #include "mimpi_common.h"
 
-#include <stdio.h>
 #include <stdbool.h>
+#include <stdio.h>
 #include <stdlib.h>
+
+extern char **environ;
 
 static bool DEADLOCK_DETECTION;
 static int WORLD_SIZE;
 static int WORLD_RANK;
 int write_descriptors[MAX_PROCESSES + 1];
 int read_descriptors[MAX_PROCESSES + 1];
+
 
 void MIMPI_Init(bool enable_deadlock_detection) {
     channels_init();
@@ -37,23 +40,43 @@ void MIMPI_Init(bool enable_deadlock_detection) {
         if (i != WORLD_RANK) {
             char write_descriptor[32];
             snprintf(write_descriptor, sizeof(write_descriptor),
-                    "MIMPI_CHANNEL_WRITE_%d_%d", WORLD_RANK, i);
+                     "MIMPI_CHANNEL_WRITE_%d", i);
             char read_descriptor[32];
             snprintf(read_descriptor, sizeof(read_descriptor),
-                    "MIMPI_CHANNEL_READ_%d_%d", WORLD_RANK, i);
+                     "MIMPI_CHANNEL_READ_%d", i);
 
-            write_descriptor[i] = atoi(getenv(write_descriptor));
-            read_descriptor[i] = atoi(getenv(read_descriptor));
+            char* temp1 = getenv(write_descriptor);
+            char* temp2 = getenv(read_descriptor);
+
+            if (temp1 && temp2) {
+                write_descriptors[i] = atoi(temp1);
+                read_descriptors[i] = atoi(temp2);
+                if (WORLD_RANK == 1)
+                    printf("Ith: %d, %d\n", write_descriptors[i], read_descriptors[i]);
+            }
+            
         }
     }
+
+    printf("Tablica desk\n");
+    printf("Pisanie\n");
+    for (int i = 0; i <= WORLD_SIZE; i++) {
+        printf("%d | ", write_descriptors[i]);
+    }
+    printf("\nCzytanie\n");
+    for (int i = 0; i <= WORLD_SIZE; i++) {
+        printf("%d | ", read_descriptors[i]);
+    }
+    printf("\n");
+    sleep(1);
 }
 
 void MIMPI_Finalize() {
     // Zamykamy nie potrzebne deskrytptory
-    for (int i = 1; i <= MAX_PROCESSES; i++) {
-        close(write_descriptors[i]);
-        close(read_descriptors[i]);
-    }
+    // for (int i = 1; i <= MAX_PROCESSES; i++) {
+    //     close(write_descriptors[i]);
+    //     close(read_descriptors[i]);
+    // }
 
     unsetenv("MIMPI_WORLD_SIZE");
     unsetenv("MIMPI_WORLD_RANK");
@@ -63,10 +86,10 @@ void MIMPI_Finalize() {
         if (i != WORLD_RANK) {
             char write_descriptor[32];
             snprintf(write_descriptor, sizeof(write_descriptor),
-                    "MIMPI_CHANNEL_WRITE_%d_%d", WORLD_RANK, i);
+                     "MIMPI_CHANNEL_WRITE_%d_%d", WORLD_RANK, i);
             char read_descriptor[32];
             snprintf(read_descriptor, sizeof(read_descriptor),
-                    "MIMPI_CHANNEL_READ_%d_%d", WORLD_RANK, i);
+                     "MIMPI_CHANNEL_READ_%d_%d", WORLD_RANK, i);
             unsetenv(write_descriptor);
             unsetenv(read_descriptor);
         }
