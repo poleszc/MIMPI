@@ -15,19 +15,107 @@
 #include <unistd.h>
 
 /// LINKED LIST IMPLEMENTATION ///
+// Struktura węzła listy
+typedef struct Node {
+    int data;
+    struct Node *next;
+    struct Node *prev;
+} Node;
 
+// Struktura listy
+typedef struct LinkedList {
+    Node *head;
+    Node *tail;
+} LinkedList;
 
+// Funkcja inicjalizująca pustą listę
+LinkedList *createLinkedList() {
+    LinkedList *list = (LinkedList *)malloc(sizeof(LinkedList));
+    list->head = NULL;
+    list->tail = NULL;
+    return list;
+}
 
+// Funkcja dodająca węzeł na koniec listy
+void append(LinkedList *list, int data) {
+    Node *newNode = (Node *)malloc(sizeof(Node));
+    newNode->data = data;
+    newNode->prev = NULL;
+    newNode->next = NULL;
 
+    if (list->head == NULL) {
+        list->head = newNode;
+    } else {
+        list->tail->next = newNode;
+        newNode->prev = list->tail;
+    }
+    list->tail = newNode;
+}
 
+// Funkcja usuwająca węzeł na podstawie wskazanego węzła
+void deleteNode(LinkedList *list, Node *nodeToDelete) {
+    if (nodeToDelete->prev != NULL) {
+        nodeToDelete->prev->next = nodeToDelete->next;
+    } else {
+        list->head = nodeToDelete->next;
+    }
 
+    if (nodeToDelete->next != NULL) {
+        nodeToDelete->next->prev = nodeToDelete->prev;
+    } else {
+        list->tail = nodeToDelete->prev;
+    }
 
+    free(nodeToDelete);
+}
 
+// Funkcja dodająca węzeł po wskazanym węźle
+void insertAfterNode(LinkedList *list, Node *prevNode, int data) {
+    if (prevNode == NULL) {
+        printf("Previous node cannot be NULL\n");
+        return;
+    }
 
+    Node *newNode = (Node *)malloc(sizeof(Node));
+    newNode->data = data;
 
+    if (prevNode->next != NULL) {
+        prevNode->next->prev = newNode;
+    } else {
+        list->tail = newNode;
+    }
 
+    newNode->next = prevNode->next;
+    prevNode->next = newNode;
+    newNode->prev = prevNode;
+}
 
+// Funkcja wyświetlająca zawartość listy
+void displayList(LinkedList *list) {
+    Node *temp = list->head;
+    while (temp != NULL) {
+        printf("%d -> ", temp->data);
+        temp = temp->next;
+    }
+    printf("NULL\n");
+}
+
+// Funkcja usuwająca wszystkie węzły z listy
+void deleteLinkedList(LinkedList *list) {
+    Node *current = list->head;
+    Node *next;
+
+    while (current != NULL) {
+        next = current->next;
+        free(current);
+        current = next;
+    }
+
+    free(list);
+}
 /// LINKED LIST IMPLEMENTATION ///
+
+
 static bool DEADLOCK_DETECTION;
 
 static int WORLD_SIZE;
@@ -42,11 +130,11 @@ fd_set readDescriptors;
 int maxFd = 0;
 pthread_mutex_t mutex;
 
-struct sendData {
+typedef struct sendData {
     int count;
     int tag;
     void *data;
-};
+} sendData;
 
 void printMyDesc() {
     printf(
@@ -81,7 +169,7 @@ void *helperThreadMain() {
         // TODO: Co jeżeli na jednym channelu czeka kilka wiadomości
         for (int i = 0; i < WORLD_SIZE; i++) {
             if (FD_ISSET(read_descriptors[i], &readDescriptors)) {
-                struct sendData *recievedData; // tu chyba trzeba mallockiem
+                sendData *recievedData; // tu chyba trzeba mallockiem
                 // Wczytujemy tylko rozmiar danych, zeby wiedziec ile trzeba
                 // wczytac
 
@@ -97,18 +185,20 @@ void *helperThreadMain() {
                 }
 
                 // Czytamy tag i dane wielkosci count, count juz wczytany
-                //TODO: mozliwe, ze tu trzeba zmniejszac totalToBeRead żeby nie zaczać czytać kolejnej wiadomości
+                // TODO: mozliwe, ze tu trzeba zmniejszac totalToBeRead żeby nie
+                // zaczać czytać kolejnej wiadomości
                 totalRead = 0;
                 totalToBeRead = sizeof(int) + recievedData->count;
                 while (totalRead < totalToBeRead) {
-                    ssize_t read = chread(read_descriptors[i], recievedData + sizeof(int) + totalRead, totalToBeRead);
+                    ssize_t read = chread(
+                        read_descriptors[i],
+                        recievedData + sizeof(int) + totalRead, totalToBeRead);
                     ASSERT_SYS_OK(read);
                     totalRead += read;
                 }
 
-                // Tutaj recievedData powinno być już wypełnione. Można je dodać do naszego bufora
-
-
+                // Tutaj recievedData powinno być już wypełnione. Można je dodać
+                // do naszego bufora
             }
         }
     }
@@ -227,7 +317,7 @@ MIMPI_Retcode MIMPI_Send(void const *data, int count, int destination,
         printf("Sending data to %d via %d\n", destination,
                write_descriptors[destination]);
 
-        struct sendData *dataStruct;
+        sendData *dataStruct;
         dataStruct->count = &count;
         dataStruct->tag = &tag;
         dataStruct->data = data;
