@@ -6,13 +6,28 @@
 #include "channel.h"
 #include "mimpi_common.h"
 
+#include <pthread.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <pthread.h>
+#include <sys/select.h>
 #include <sys/types.h>
 #include <unistd.h>
 
+/// LINKED LIST IMPLEMENTATION ///
+
+
+
+
+
+
+
+
+
+
+
+
+/// LINKED LIST IMPLEMENTATION ///
 static bool DEADLOCK_DETECTION;
 
 static int WORLD_SIZE;
@@ -20,17 +35,18 @@ static int WORLD_RANK;
 int write_descriptors[MAX_PROCESSES + 1];
 int read_descriptors[MAX_PROCESSES + 1];
 
-//Helper thread data
+// Helper thread data
 bool helperThreadActive = true;
 pthread_t helperThread;
+fd_set readDescriptors;
+int maxFd = 0;
+pthread_mutex_t mutex;
 
-struct {
+struct sendData {
     int count;
     int tag;
-    void* data;
-}; typedef sendData;
-
-
+    void *data;
+};
 
 void printMyDesc() {
     printf(
@@ -50,24 +66,61 @@ void printMyDesc() {
         "================================================================\n");
 }
 
-void* helperThreadMain() {
+void *helperThreadMain() {
+    // Dodajemy wszystkie desktyptory do zbioru tych, na które czekamy
+    FD_ZERO(&readDescriptors);
+    for (int i = 0; i < WORLD_SIZE; i++) {
+        FD_SET(read_descriptors[i], &readDescriptors);
+    }
+
     while (helperThreadActive) {
-        // tutaj czekamy na wiadomosci i je buforujemy
+        // Jeżeli nie ma żadnych gotowych desktyptorów to wątek czeka
+        int ready = select(maxFd + 1, &readDescriptors, NULL, NULL, NULL);
+        ASSERT_SYS_OK(ready);
+
+        // TODO: Co jeżeli na jednym channelu czeka kilka wiadomości
+        for (int i = 0; i < WORLD_SIZE; i++) {
+            if (FD_ISSET(read_descriptors[i], &readDescriptors)) {
+                struct sendData *recievedData; // tu chyba trzeba mallockiem
+                // Wczytujemy tylko rozmiar danych, zeby wiedziec ile trzeba
+                // wczytac
+
+                // Ten while tutaj to troche z armaty do wróbla. TODO: Może usuń
+                // while'a.
+                int totalRead = 0;
+                int totalToBeRead = sizeof(int);
+                while (totalRead < totalToBeRead) {
+                    ssize_t read = (read_descriptors[i],
+                                    recievedData + totalRead, sizeof(int));
+                    ASSERT_SYS_OK(read);
+                    totalRead += read;
+                }
+
+                // Czytamy tag i dane wielkosci count, count juz wczytany
+                //TODO: mozliwe, ze tu trzeba zmniejszac totalToBeRead żeby nie zaczać czytać kolejnej wiadomości
+                totalRead = 0;
+                totalToBeRead = sizeof(int) + recievedData->count;
+                while (totalRead < totalToBeRead) {
+                    ssize_t read = chread(read_descriptors[i], recievedData + sizeof(int) + totalRead, totalToBeRead);
+                    ASSERT_SYS_OK(read);
+                    totalRead += read;
+                }
+
+                // Tutaj recievedData powinno być już wypełnione. Można je dodać do naszego bufora
 
 
-
-
+            }
+        }
     }
 }
-
 
 void MIMPI_Init(bool enable_deadlock_detection) {
     channels_init();
 
     DEADLOCK_DETECTION = enable_deadlock_detection;
     if (enable_deadlock_detection && WORLD_RANK == 0) {
-        //  TODO: trzeba stworzyc jakis dodatkowy proces ktory bedzie przyjmował informacje o wysyłkach i przyjeciach
-        //  i naklepac do tego jakis graf 
+        //  TODO: trzeba stworzyc jakis dodatkowy proces ktory bedzie przyjmował
+        //  informacje o wysyłkach i przyjeciach i naklepac do tego jakis graf
     }
     // Inicjalizujemy World Size i World Rank
     const char *world_size_env = getenv("MIMPI_WORLD_SIZE");
@@ -94,8 +147,16 @@ void MIMPI_Init(bool enable_deadlock_detection) {
             char *temp2 = getenv(read_descriptor);
 
             if (temp1 && temp2) {
-                write_descriptors[i] = atoi(temp1);
-                read_descriptors[i] = atoi(temp2);
+                int writeDesc = atoi(temp1);
+                int readDesc = atoi(temp2);
+
+                // Maksymalna wartość deskryptora do select
+                if (readDesc > maxFd) {
+                    maxFd = readDesc;
+                }
+
+                write_descriptors[i] = writeDesc;
+                read_descriptors[i] = readDesc;
                 if (WORLD_RANK == 1)
                     printf("Ith: %d, %d\n", write_descriptors[i],
                            read_descriptors[i]);
@@ -104,19 +165,19 @@ void MIMPI_Init(bool enable_deadlock_detection) {
     }
 
     // Tworzymy wątek pomocniczy
+    ASSERT_ZERO(pthread_mutex_init(&mutex, NULL));
     ASSERT_ZERO(pthread_create(&helperThread, NULL, helperThreadMain, NULL));
-
-
-
 }
 
 void MIMPI_Finalize() {
 
-    //TODO: Musimy wysłać wiadomość do wszystkich procesów które czekały na wiadomość od nas, ze wychodzimy z bloku
+    // TODO: Musimy wysłać wiadomość do wszystkich procesów które czekały na
+    // wiadomość od nas, ze wychodzimy z bloku
 
     // Ubijamy nasz helper thread
     helperThreadActive = false;
     ASSERT_ZERO(pthread_join(helperThread, NULL));
+    ASSERT_ZERO(pthread_mutex_destroy(&mutex));
 
     // Zamykamy nie potrzebne deskrytptory
     for (int i = 0; i <= WORLD_SIZE; i++) {
@@ -166,27 +227,22 @@ MIMPI_Retcode MIMPI_Send(void const *data, int count, int destination,
         printf("Sending data to %d via %d\n", destination,
                write_descriptors[destination]);
 
+        struct sendData *dataStruct;
+        dataStruct->count = &count;
+        dataStruct->tag = &tag;
+        dataStruct->data = data;
+
+        int structSize = count + 2 * sizeof(int);
+
         ssize_t total_sent = 0;
         while (total_sent < count) {
-            ssize_t wrote = chsend(write_descriptors[destination], data + total_sent, count);
+            ssize_t wrote = chsend(write_descriptors[destination],
+                                   dataStruct + total_sent, structSize);
             ASSERT_SYS_OK(wrote);
+            total_sent += wrote;
         }
         return MIMPI_SUCCESS;
     }
-
-    /*
-    if (destination == MIMPI_World_rank()) {
-        return MIMPI_ERROR_ATTEMPTED_SELF_OP;
-    } else if (destination not in MIMPI) {
-        return MIMPI_ERROR_NO_SUCH_RANK;
-    } else if (destination already finished) {
-        return MIMPI_ERROR_REMOTE_FINISHED;
-    }
-
-
-
-    return MIMPI_SUCCESS;
-    */
 }
 
 MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
@@ -194,7 +250,6 @@ MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
     // rank(zapisanej w source)
     // Zapisuje ta wiadomość pod adresem data, nie musimy martwic się ze cos tam
     // nadpiszemy, bo to wołający ma to ogarnac
-
 
     // TODO: Sprawdzenie czy program na ktory czekamy wyszedł z bloku MIMPI i
     // nie wysłał pasującej wiadomosci
@@ -209,9 +264,11 @@ MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
         printf("Recieving data from %d via %d\n", source,
                read_descriptors[source]);
 
+        // TODO: Zmienić odbieranie, zeby wczytywac do structa
         ssize_t total_read = 0;
         while (total_read < count) {
-            ssize_t read = chrecv(read_descriptors[source], data + total_read, count);
+            ssize_t read =
+                chrecv(read_descriptors[source], data + total_read, count);
             ASSERT_SYS_OK(read);
         }
         return MIMPI_SUCCESS;
