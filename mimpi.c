@@ -9,14 +9,28 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <pthread.h>
 #include <sys/types.h>
 #include <unistd.h>
 
 static bool DEADLOCK_DETECTION;
+
 static int WORLD_SIZE;
 static int WORLD_RANK;
 int write_descriptors[MAX_PROCESSES + 1];
 int read_descriptors[MAX_PROCESSES + 1];
+
+//Helper thread data
+bool helperThreadActive = true;
+pthread_t helperThread;
+
+struct {
+    int count;
+    int tag;
+    void* data;
+}; typedef sendData;
+
+
 
 void printMyDesc() {
     printf(
@@ -36,14 +50,28 @@ void printMyDesc() {
         "================================================================\n");
 }
 
+void* helperThreadMain() {
+    while (helperThreadActive) {
+        // tutaj czekamy na wiadomosci i je buforujemy
+
+
+
+
+    }
+}
+
+
 void MIMPI_Init(bool enable_deadlock_detection) {
     channels_init();
 
     DEADLOCK_DETECTION = enable_deadlock_detection;
+    if (enable_deadlock_detection && WORLD_RANK == 0) {
+        //  TODO: trzeba stworzyc jakis dodatkowy proces ktory bedzie przyjmował informacje o wysyłkach i przyjeciach
+        //  i naklepac do tego jakis graf 
+    }
     // Inicjalizujemy World Size i World Rank
     const char *world_size_env = getenv("MIMPI_WORLD_SIZE");
     const char *world_rank_env = getenv("MIMPI_WORLD_RANK");
-
     if (world_rank_env != NULL && world_size_env != NULL) {
         WORLD_SIZE = atoi(world_size_env);
         WORLD_RANK = atoi(world_rank_env);
@@ -75,23 +103,21 @@ void MIMPI_Init(bool enable_deadlock_detection) {
         }
     }
 
-    if (WORLD_RANK == 1 || WORLD_RANK == 0) {
-        printf("WORLD_RANK: %d\n", WORLD_RANK);
-        printf("WRITE DESCRIPTORS\n");
-        for (int i = 0; i < WORLD_SIZE; i++) {
-            printf("%d | ", write_descriptors[i]);
-        }
-        printf("\n");
-        printf("READ DESCRIPTORS\n");
-        for (int i = 0; i < WORLD_SIZE; i++) {
-            printf("%d | ", read_descriptors[i]);
-        }
-        printf("\n");
-        printMyDesc();
-    }
+    // Tworzymy wątek pomocniczy
+    ASSERT_ZERO(pthread_create(&helperThread, NULL, helperThreadMain, NULL));
+
+
+
 }
 
 void MIMPI_Finalize() {
+
+    //TODO: Musimy wysłać wiadomość do wszystkich procesów które czekały na wiadomość od nas, ze wychodzimy z bloku
+
+    // Ubijamy nasz helper thread
+    helperThreadActive = false;
+    ASSERT_ZERO(pthread_join(helperThread, NULL));
+
     // Zamykamy nie potrzebne deskrytptory
     for (int i = 0; i <= WORLD_SIZE; i++) {
         if (i != WORLD_RANK) {
@@ -131,6 +157,7 @@ MIMPI_Retcode MIMPI_Send(void const *data, int count, int destination,
     // ktory juz nie istnieje bo wyszedl z bloku MPI to zwracamy
     // MIMPI_ERROR_REMOTE_FINISHED Chyba tu nie zwracamy MIMPI_DEADLOCK_DETECTED
 
+    // TODO: Sprawdzenie czy program do ktorego wysyłamy wyszedł z bloku MIMPI
     if (destination < 0 || destination > WORLD_SIZE) {
         return MIMPI_ERROR_NO_SUCH_RANK;
     } else if (destination == WORLD_RANK) {
@@ -138,12 +165,12 @@ MIMPI_Retcode MIMPI_Send(void const *data, int count, int destination,
     } else {
         printf("Sending data to %d via %d\n", destination,
                write_descriptors[destination]);
-        ssize_t wrote = chsend(write_descriptors[destination], data, count);
-        ASSERT_SYS_OK(wrote);
-        if (wrote != count)
-            fatal("Wrote less than expected: %zd out of %zu bytes.", wrote,
-                  count);
 
+        ssize_t total_sent = 0;
+        while (total_sent < count) {
+            ssize_t wrote = chsend(write_descriptors[destination], data + total_sent, count);
+            ASSERT_SYS_OK(wrote);
+        }
         return MIMPI_SUCCESS;
     }
 
@@ -168,22 +195,12 @@ MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
     // Zapisuje ta wiadomość pod adresem data, nie musimy martwic się ze cos tam
     // nadpiszemy, bo to wołający ma to ogarnac
 
-    // Wywołanie jest BLOKUJACE czyli konczy sie dopiero jak uzyskamy cala
-    // wiadomosc Moze do tego jaka tablica semaforow procesoe oczekajacych na
-    // wiadomosc, bo jest ich tylko 16 Jezeli proces wychodzi z mimpi to musi
-    // powiedziec procesom ktore czekamy na wiadomosc od niego ze wychodzi, bo
-    // to moze zakonczyc je błędem.
 
-    // Wersja 1:
-    // Jeden proces wysyła komunikaty w tkaiej kolejnsci w jakiej odbiorce chce
-    // je odebrac Tzn jezeli wysyłamy z 0 do 1 to nie moze byc tak ze 0 wysyła
-    // tag1 a potem tag0, a 1 odbiera tag0 a potem tag1 Jest tez ograniczenie na
-    // wielkosc wiadomosci <512 bajtow, bo pewnie ten zjebany channel tylko tyle
-    // wysle
-
-    // Wersja 2:
-    // Nie mozna nic założyc o kolejnosci wysłanych pakietów
-
+    // TODO: Sprawdzenie czy program na ktory czekamy wyszedł z bloku MIMPI i
+    // nie wysłał pasującej wiadomosci
+    // TODO: Jeżeli proces tu wejdzie i czeka na wiadomość, a w między czasie
+    // ten na ktory czekał wyjdzie to wychodzac musi wysłac ping do procesow
+    // ktore czekały na wiadomosc od niego.
     if (source < 0 || source > WORLD_SIZE) {
         return MIMPI_ERROR_NO_SUCH_RANK;
     } else if (source == WORLD_RANK) {
@@ -191,11 +208,11 @@ MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
     } else {
         printf("Recieving data from %d via %d\n", source,
                read_descriptors[source]);
-        ssize_t read = chrecv(read_descriptors[source], data, count);
-        ASSERT_SYS_OK(read);
-        if (read < count) {
-            fatal("Read less than expected: %zd out of %zu bytes.", read,
-                  count);
+
+        ssize_t total_read = 0;
+        while (total_read < count) {
+            ssize_t read = chrecv(read_descriptors[source], data + total_read, count);
+            ASSERT_SYS_OK(read);
         }
         return MIMPI_SUCCESS;
     }
