@@ -143,8 +143,10 @@ void deleteLinkedList(LinkedList *list) {
 
 Node *searchAndRemoveMessage(LinkedList *list, int tag, int count) {
     Node *curr = list->head;
-    while ((curr->data->tag != tag || curr->data->count != count) &&
-           curr != list->tail) {
+
+    while (curr != list->tail &&
+           (tag == MIMPI_ANY_TAG && curr->data->count != count) &&
+           (curr->data->tag != tag || curr->data->count != count)) {
         curr = curr->next;
     }
 
@@ -249,8 +251,9 @@ void *helperThreadMain() {
                 // do naszego bufora
 
                 // Sprawdzamy czy ktoś czeka na to co własnie wczytaliśmy
-                if (tagIWaitFor == recievedData->tag &&
-                    countIWaitFor == recievedData->count) {
+                if (countIWaitFor == recievedData->count &&
+                    (tagIWaitFor == recievedData->tag ||
+                     tagIWaitFor == MIMPI_ANY_TAG)) {
                     justRecieved = recievedData;
                     ASSERT_ZERO(pthread_mutex_unlock(&mutex));
                 } else {
