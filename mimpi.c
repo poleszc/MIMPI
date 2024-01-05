@@ -170,14 +170,14 @@ static bool DEADLOCK_DETECTION;
 static int WORLD_SIZE;
 static int WORLD_RANK;
 // Na indeksie i jest numer deskryptora do czytania wiadomości od i-tego procesu
-int write_descriptors[MAX_PROCESSES + 1];
+int writeDescriptors[MAX_PROCESSES + 1];
 // Na indeksie i jest numer deskryptora do pisania do i-tego procesu
-int read_descriptors[MAX_PROCESSES + 1];
+int readDescriptors[MAX_PROCESSES + 1];
 
 // Helper thread data
 pthread_t helperThread;
 bool helperThreadActive = true;
-fd_set readDescriptors;
+fd_set readDescriptorsSet;
 int maxFd = 0; // max file descriptor(for select purposes)
 
 pthread_mutex_t mutex;
@@ -189,20 +189,20 @@ sendData *justRecieved = NULL;
 
 // Tablica linked list. Na i-tym indeksie jest lista wiadomości przychodzących
 // od i-tego procesu
-LinkedList *buffer[MAX_PROCESSES];
+LinkedList *messageBuffer[MAX_PROCESSES];
 /// GLOBALS END ///
 
 void *helperThreadMain() {
     // Dodajemy wszystkie desktyptory do zbioru śledzonych
-    FD_ZERO(&readDescriptors);
+    FD_ZERO(&readDescriptorsSet);
     for (int i = 0; i < WORLD_SIZE; i++) {
-        FD_SET(read_descriptors[i], &readDescriptors);
+        FD_SET(readDescriptors[i], &readDescriptorsSet);
     }
 
     int startingIndex = 0, i = 0, count = 0;
     while (helperThreadActive) {
         // Jeżeli nie ma żadnych gotowych desktyptorów to wątek czeka
-        int ready = select(maxFd + 1, &readDescriptors, NULL, NULL, NULL);
+        int ready = select(maxFd + 1, &readDescriptorsSet, NULL, NULL, NULL);
         ASSERT_SYS_OK(ready);
 
         // Przechodzimy do deskryptorach cyklicznie, zaczynajac zawsze od
@@ -213,7 +213,7 @@ void *helperThreadMain() {
         // TODO: Co jeżeli na jednym channelu czeka kilka wiadomości. Chyba to
         // już rozwiązane
         while (count < WORLD_SIZE) {
-            if (FD_ISSET(read_descriptors[i], &readDescriptors)) {
+            if (FD_ISSET(readDescriptors[i], &readDescriptorsSet)) {
                 // Wczytujemy tylko rozmiar danych, zeby wiedziec ile pamięci
                 // zaalokować.
                 // Ten while tutaj to troche z armaty do wróbla.
@@ -223,9 +223,10 @@ void *helperThreadMain() {
                 int totalToBeRead = sizeof(int);
                 while (totalRead < totalToBeRead) {
                     ssize_t read =
-                        (read_descriptors[i], count + totalRead, sizeof(int));
+                        (readDescriptors[i], count + totalRead, totalToBeRead);
                     ASSERT_SYS_OK(read);
                     totalRead += read;
+                    totalToBeRead -= read;
                 }
 
                 sendData *recievedData =
@@ -234,16 +235,15 @@ void *helperThreadMain() {
                 recievedData->count = count;
 
                 // Czytamy tag i dane wielkosci count, count juz wczytany
-                // TODO: mozliwe, ze tu trzeba zmniejszac totalToBeRead żeby nie
-                // zaczać czytać kolejnej wiadomości
                 totalRead = 0;
                 totalToBeRead = sizeof(int) + recievedData->count;
                 while (totalRead < totalToBeRead) {
                     ssize_t read = chread(
-                        read_descriptors[i],
+                        readDescriptors[i],
                         recievedData + sizeof(int) + totalRead, totalToBeRead);
                     ASSERT_SYS_OK(read);
                     totalRead += read;
+                    totalToBeRead -= read;
                 }
                 // Tutaj recievedData powinno być już wypełnione. Można je dodać
                 // do naszego bufora
@@ -254,7 +254,7 @@ void *helperThreadMain() {
                     justRecieved = recievedData;
                     ASSERT_ZERO(pthread_mutex_unlock(&mutex));
                 } else {
-                    append(buffer[i], recievedData);
+                    append(messageBuffer[i], recievedData);
                 }
             }
             i = (i + 1) % WORLD_SIZE;
@@ -305,18 +305,18 @@ void MIMPI_Init(bool enable_deadlock_detection) {
                     maxFd = readDesc;
                 }
 
-                write_descriptors[i] = writeDesc;
-                read_descriptors[i] = readDesc;
+                writeDescriptors[i] = writeDesc;
+                readDescriptors[i] = readDesc;
                 if (WORLD_RANK == 1)
-                    printf("Ith: %d, %d\n", write_descriptors[i],
-                           read_descriptors[i]);
+                    printf("Ith: %d, %d\n", writeDescriptors[i],
+                           readDescriptors[i]);
             }
         }
     }
 
     // Inicjalizujemy bufor na senda.
     for (int i = 0; i < MAX_PROCESSES; i++) {
-        buffer[i] = createLinkedList();
+        messageBuffer[i] = createLinkedList();
     }
 
     // Tworzymy wątek pomocniczy
@@ -337,14 +337,14 @@ void MIMPI_Finalize() {
 
     // Niszczymy bufor na senda.
     for (int i = 0; i < MAX_PROCESSES; i++) {
-        deleteLinkedList(buffer[i]);
+        deleteLinkedList(messageBuffer[i]);
     }
 
     // Zamykamy nie potrzebne deskrytptory
     for (int i = 0; i <= WORLD_SIZE; i++) {
         if (i != WORLD_RANK) {
-            close(write_descriptors[i]);
-            close(read_descriptors[i]);
+            close(writeDescriptors[i]);
+            close(readDescriptors[i]);
         }
     }
 
@@ -386,7 +386,7 @@ MIMPI_Retcode MIMPI_Send(void const *data, int count, int destination,
         return MIMPI_ERROR_ATTEMPTED_SELF_OP;
     } else {
         printf("Sending data to %d via %d\n", destination,
-               write_descriptors[destination]);
+               writeDescriptors[destination]);
 
         // TODO: Tu moze malloc, chyba w sumie nie bo wysyłamy dane sendem
         // przed zniknieciem
@@ -395,14 +395,14 @@ MIMPI_Retcode MIMPI_Send(void const *data, int count, int destination,
         dataStruct->tag = &tag;
         dataStruct->data = data;
 
-        int structSize = count + 2 * sizeof(int);
-
-        ssize_t total_sent = 0;
-        while (total_sent < count) {
-            ssize_t wrote = chsend(write_descriptors[destination],
-                                   dataStruct + total_sent, structSize);
+        int totalToBeSent = count + 2 * sizeof(int);
+        ssize_t totalSent = 0;
+        while (totalSent < count) {
+            ssize_t wrote = chsend(writeDescriptors[destination],
+                                   dataStruct + totalSent, totalToBeSent);
             ASSERT_SYS_OK(wrote);
-            total_sent += wrote;
+            totalSent += wrote;
+            totalToBeSent -= wrote;
         }
         return MIMPI_SUCCESS;
     }
@@ -427,8 +427,7 @@ MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
     // else if (wysylajacy się skończyl i nie wysłał pasujacej wiadomosci) {}
 
     else {
-        // Tutaj z sendem wszystko okej, musimy odebrać wiadomość
-        sendData *found = searchAndRemoveMessage(buffer, tag, count);
+        sendData *found = searchAndRemoveMessage(messageBuffer, tag, count);
         if (!found) { // Jeszcze nie ma wiadomości dla nas. Wieszamy się na
                       // mutexie
             tagIWaitFor = tag;
