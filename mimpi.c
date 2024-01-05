@@ -14,10 +14,16 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+typedef struct sendData {
+    int count;
+    int tag;
+    void *data;
+} sendData;
+
 /// LINKED LIST IMPLEMENTATION ///
 // Struktura węzła listy
 typedef struct Node {
-    int data;
+    sendData *data;
     struct Node *next;
     struct Node *prev;
 } Node;
@@ -31,14 +37,16 @@ typedef struct LinkedList {
 // Funkcja inicjalizująca pustą listę
 LinkedList *createLinkedList() {
     LinkedList *list = (LinkedList *)malloc(sizeof(LinkedList));
+    ASSERT_MALLOC_OK(list);
     list->head = NULL;
     list->tail = NULL;
     return list;
 }
 
 // Funkcja dodająca węzeł na koniec listy
-void append(LinkedList *list, int data) {
+void append(LinkedList *list, sendData *data) {
     Node *newNode = (Node *)malloc(sizeof(Node));
+    ASSERT_MALLOC_OK(newNode);
     newNode->data = data;
     newNode->prev = NULL;
     newNode->next = NULL;
@@ -52,7 +60,8 @@ void append(LinkedList *list, int data) {
     list->tail = newNode;
 }
 
-// Funkcja usuwająca węzeł na podstawie wskazanego węzła
+// Funkcja usuwająca węzeł na podstawie wskazanego węzła. Zwalnia pamięc na
+// data.
 void deleteNode(LinkedList *list, Node *nodeToDelete) {
     if (nodeToDelete->prev != NULL) {
         nodeToDelete->prev->next = nodeToDelete->next;
@@ -66,17 +75,19 @@ void deleteNode(LinkedList *list, Node *nodeToDelete) {
         list->tail = nodeToDelete->prev;
     }
 
+    free(nodeToDelete->data);
     free(nodeToDelete);
 }
 
 // Funkcja dodająca węzeł po wskazanym węźle
-void insertAfterNode(LinkedList *list, Node *prevNode, int data) {
+void insertAfterNode(LinkedList *list, Node *prevNode, sendData *data) {
     if (prevNode == NULL) {
         printf("Previous node cannot be NULL\n");
         return;
     }
 
     Node *newNode = (Node *)malloc(sizeof(Node));
+    ASSERT_MALLOC_OK(newNode);
     newNode->data = data;
 
     if (prevNode->next != NULL) {
@@ -100,13 +111,14 @@ void displayList(LinkedList *list) {
     printf("NULL\n");
 }
 
-// Funkcja usuwająca wszystkie węzły z listy
+// Funkcja usuwająca wszystkie węzły z listy. Zwalnia pamieć która zajmuje data
 void deleteLinkedList(LinkedList *list) {
     Node *current = list->head;
     Node *next;
 
     while (current != NULL) {
         next = current->next;
+        free(current->data);
         free(current);
         current = next;
     }
@@ -115,7 +127,7 @@ void deleteLinkedList(LinkedList *list) {
 }
 /// LINKED LIST IMPLEMENTATION ///
 
-
+/// GLOBALS ///
 static bool DEADLOCK_DETECTION;
 
 static int WORLD_SIZE;
@@ -130,11 +142,8 @@ fd_set readDescriptors;
 int maxFd = 0;
 pthread_mutex_t mutex;
 
-typedef struct sendData {
-    int count;
-    int tag;
-    void *data;
-} sendData;
+LinkedList *buffer[MAX_PROCESSES];
+/// GLOBALS END ///
 
 void printMyDesc() {
     printf(
@@ -155,7 +164,7 @@ void printMyDesc() {
 }
 
 void *helperThreadMain() {
-    // Dodajemy wszystkie desktyptory do zbioru tych, na które czekamy
+    // Dodajemy wszystkie desktyptory do zbioru śledzonych
     FD_ZERO(&readDescriptors);
     for (int i = 0; i < WORLD_SIZE; i++) {
         FD_SET(read_descriptors[i], &readDescriptors);
@@ -169,20 +178,23 @@ void *helperThreadMain() {
         // TODO: Co jeżeli na jednym channelu czeka kilka wiadomości
         for (int i = 0; i < WORLD_SIZE; i++) {
             if (FD_ISSET(read_descriptors[i], &readDescriptors)) {
-                sendData *recievedData; // tu chyba trzeba mallockiem
-                // Wczytujemy tylko rozmiar danych, zeby wiedziec ile trzeba
-                // wczytac
-
-                // Ten while tutaj to troche z armaty do wróbla. TODO: Może usuń
-                // while'a.
+                // Wczytujemy tylko rozmiar danych, zeby wiedziec ile pamięci
+                // zaalokować Ten while tutaj to troche z armaty do wróbla.
+                // TODO: Może usuń while'a.
+                int count;
                 int totalRead = 0;
                 int totalToBeRead = sizeof(int);
                 while (totalRead < totalToBeRead) {
-                    ssize_t read = (read_descriptors[i],
-                                    recievedData + totalRead, sizeof(int));
+                    ssize_t read =
+                        (read_descriptors[i], count + totalRead, sizeof(int));
                     ASSERT_SYS_OK(read);
                     totalRead += read;
                 }
+
+                sendData *recievedData =
+                    (sendData *)malloc(2 * sizeof(int) + count);
+                ASSERT_MALLOC_OK(recievedData);
+                recievedData->count = count;
 
                 // Czytamy tag i dane wielkosci count, count juz wczytany
                 // TODO: mozliwe, ze tu trzeba zmniejszac totalToBeRead żeby nie
@@ -199,6 +211,9 @@ void *helperThreadMain() {
 
                 // Tutaj recievedData powinno być już wypełnione. Można je dodać
                 // do naszego bufora
+                append(buffer[i], recievedData);
+
+                // TODO: Obudzić proces, jeżeli czeka na ta wiadomość
             }
         }
     }
@@ -254,6 +269,11 @@ void MIMPI_Init(bool enable_deadlock_detection) {
         }
     }
 
+    // Inicjalizujemy bufor na senda.
+    for (int i = 0; i < MAX_PROCESSES; i++) {
+        buffer[i] = createLinkedList();
+    }
+
     // Tworzymy wątek pomocniczy
     ASSERT_ZERO(pthread_mutex_init(&mutex, NULL));
     ASSERT_ZERO(pthread_create(&helperThread, NULL, helperThreadMain, NULL));
@@ -268,6 +288,11 @@ void MIMPI_Finalize() {
     helperThreadActive = false;
     ASSERT_ZERO(pthread_join(helperThread, NULL));
     ASSERT_ZERO(pthread_mutex_destroy(&mutex));
+
+    // Niszczymy bufor na senda.
+    for (int i = 0; i < MAX_PROCESSES; i++) {
+        deleteLinkedList(buffer[i]);
+    }
 
     // Zamykamy nie potrzebne deskrytptory
     for (int i = 0; i <= WORLD_SIZE; i++) {
@@ -309,7 +334,7 @@ MIMPI_Retcode MIMPI_Send(void const *data, int count, int destination,
     // MIMPI_ERROR_REMOTE_FINISHED Chyba tu nie zwracamy MIMPI_DEADLOCK_DETECTED
 
     // TODO: Sprawdzenie czy program do ktorego wysyłamy wyszedł z bloku MIMPI
-    if (destination < 0 || destination > WORLD_SIZE) {
+    if (destination < 0 || destination > WORLD_SIZE - 1) {
         return MIMPI_ERROR_NO_SUCH_RANK;
     } else if (destination == WORLD_RANK) {
         return MIMPI_ERROR_ATTEMPTED_SELF_OP;
@@ -317,6 +342,8 @@ MIMPI_Retcode MIMPI_Send(void const *data, int count, int destination,
         printf("Sending data to %d via %d\n", destination,
                write_descriptors[destination]);
 
+        // TODO: Tu chyba malloc, chyba w sumie nie bo wysyłamy dane sendem
+        // przed zniknieciem
         sendData *dataStruct;
         dataStruct->count = &count;
         dataStruct->tag = &tag;
@@ -346,11 +373,15 @@ MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
     // TODO: Jeżeli proces tu wejdzie i czeka na wiadomość, a w między czasie
     // ten na ktory czekał wyjdzie to wychodzac musi wysłac ping do procesow
     // ktore czekały na wiadomosc od niego.
-    if (source < 0 || source > WORLD_SIZE) {
+    if (source < 0 || source > WORLD_SIZE - 1) {
         return MIMPI_ERROR_NO_SUCH_RANK;
     } else if (source == WORLD_RANK) {
         return MIMPI_ERROR_ATTEMPTED_SELF_OP;
     } else {
+        
+
+
+
         printf("Recieving data from %d via %d\n", source,
                read_descriptors[source]);
 
@@ -364,14 +395,6 @@ MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
         return MIMPI_SUCCESS;
     }
 
-    /*
-    if (source didnt send any message and left the mpi block ||
-        this process is waiting for a send but source leaves) {
-        return MIMPI_ERROR_REMOTE_FINISHED;
-    }
-    else if () {
-    }
-    */
 }
 
 MIMPI_Retcode MIMPI_Barrier(){
