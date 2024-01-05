@@ -59,6 +59,11 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    int helperDecriptors[MAX_PROCESSES][2];
+    for (int i = 0; i < n; i++) {
+        ASSERT_SYS_OK(channel(helperDecriptors[i]));
+    }
+
     printf("===========PRINT ALL CHANNELS===========\n");
     for (int i = 0; i < n; i++) {
         for (int j = 0; j < n; j++) {
@@ -66,7 +71,11 @@ int main(int argc, char *argv[]) {
         }
         printf("\n");
     }
-    printf("=========================================\n");
+    printf("===========HELPER DESC===========\n");
+    for (int i = 0; i < n; i++) {
+            printf("{%d, %d} | ", helperDecriptors[i][0], helperDecriptors[i][1]);
+    }
+    printf("\n=========================================\n");
 
     // Zamykamy tymczasowe deskryptory
     close(mockDesc[0]);
@@ -85,6 +94,20 @@ int main(int argc, char *argv[]) {
             char index_arg[3];
             snprintf(index_arg, sizeof(index_arg), "%d", i);
             setenv("MIMPI_WORLD_RANK", index_arg, 1);
+
+            // Przekazujemy deskryptory do komunikacji z watkiem pomocniczym
+            char helperWrite[32];
+            snprintf(helperWrite, sizeof(helperWrite), "MIMPI_HELPER_WRITE");
+            char helperRead[32];
+            snprintf(helperRead, sizeof(helperRead), "MIMPI_HELPER_READ");
+
+            char writeHelperBuffer[8], readHelperBuffer[8];
+            snprintf(writeHelperBuffer, sizeof(writeHelperBuffer), "%d",
+                     helperDecriptors[i][1]);
+            snprintf(readHelperBuffer, sizeof(readHelperBuffer), "%d",
+                     helperDecriptors[i][0]);
+            setenv(helperWrite, writeHelperBuffer, 1);
+            setenv(helperRead, readHelperBuffer, 1);
 
             // Przekazujemy dekstyptory do czytania i pisania do programu
             int descriptor_count = 0;
