@@ -18,7 +18,7 @@ typedef struct sendData {
     void *data;
 } sendData;
 
-/// LINKED LIST IMPLEMENTATION ///
+/// DOUBLY LINKED LIST IMPLEMENTATION ///
 // Struktura węzła listy
 typedef struct Node {
     sendData *data;
@@ -35,7 +35,7 @@ typedef struct LinkedList {
 // Funkcja inicjalizująca pustą listę
 LinkedList *createLinkedList() {
     LinkedList *list = (LinkedList *)malloc(sizeof(LinkedList));
-    ASSERT_MALLOC_OK(list);
+    ASSERT_NOT_NULL(list);
     list->head = NULL;
     list->tail = NULL;
     return list;
@@ -44,7 +44,7 @@ LinkedList *createLinkedList() {
 // Funkcja dodająca węzeł na koniec listy
 void append(LinkedList *list, sendData *data) {
     Node *newNode = (Node *)malloc(sizeof(Node));
-    ASSERT_MALLOC_OK(newNode);
+    ASSERT_NOT_NULL(newNode);
     newNode->data = data;
     newNode->prev = NULL;
     newNode->next = NULL;
@@ -104,7 +104,7 @@ void insertAfterNode(LinkedList *list, Node *prevNode, sendData *data) {
     }
 
     Node *newNode = (Node *)malloc(sizeof(Node));
-    ASSERT_MALLOC_OK(newNode);
+    ASSERT_NOT_NULL(newNode);
     newNode->data = data;
 
     if (prevNode->next != NULL) {
@@ -160,49 +160,43 @@ sendData *searchAndRemoveMessage(LinkedList *list, int tag, int count) {
     deleteNode(list, curr);
     return data;
 }
-/// LINKED LIST IMPLEMENTATION END ///
+/// DOUBLY LINKED LIST IMPLEMENTATION END ///
 
-/// GLOBALS ///
-// Oznacza, ze proces nie czeka na odebranie wiadomosci.
-// Tego tagu nie można używać żeby wysyłać pomocnicze wiadomości
-// do procesów.
+///////// MY GLOBALS /////////
+// Oznacza, ze proces główny nie czeka na odebranie wiadomosci.
+// Nie można go używać żeby wysyłać pomocnicze wiadomości do procesów.
 #define NOWAIT_TAG -1
 
 static bool DEADLOCK_DETECTION;
-
 static int WORLD_SIZE;
 static int WORLD_RANK;
-// Na indeksie i jest numer deskryptora do czytania wiadomości od i-tego procesu
-int writeDescriptors[MAX_PROCESSES];
-// Na indeksie i jest numer deskryptora do pisania do i-tego procesu
-int readDescriptors[MAX_PROCESSES];
-// Na indeksie i jest numer deskryptora do pisania do i-tego procesu
-int programEndingWriteDescriptors[MAX_PROCESSES];
+
+// Pod i jest numer deskryptora do czytania wiadomości od i-tego procesu
+int SEND_FDS[MAX_PROCESSES];
+// Pod i jest numer deskryptora do pisania do i-tego procesu
+int RECV_FDS[MAX_PROCESSES];
+// Pod i jest numer deskryptora do pisania do i-tego procesu o zakonczeniu
+int PROGRAM_ENDING_FDS[MAX_PROCESSES];
 // Deskryptor do czytania wiadomości o zakonczeniu programu od samego siebie
 int READ_FROM_MYSELF;
 
 // Helper thread data
+LinkedList *messageBuffer[MAX_PROCESSES]; // Wiadomości od i-tego procesu
+pthread_mutex_t bufferMutex;              // Chroni bufor
+sem_t mainThreadStopper; // Zatrzymuje watek glowny jak nie ma wiadomosci
 pthread_t helperThread;
 bool helperThreadActive = true;
 fd_set readDescriptorsSet;
-int maxFd = 0; // max file descriptor(for select purposes)
+int maxFd = 0; // Maksymalna wartość deskryptora(do selecta)
 
-pthread_mutex_t bufferMutex; // chroni bufor
-sem_t mainThreadStopper;     // zatrzymuje watek glowny jak nie ma dla niego
-                             // wiadomosci
-
+// Na jaką wiadomość obecnie czeka wątek główny na mutexie.
 int tagIWaitFor = NOWAIT_TAG;
 int countIWaitFor = NOWAIT_TAG;
 int sourceIWaitFor = NOWAIT_TAG;
 // Jeżeli helper odczytał dane, na które akurat czeka recv to nie wrzuca ich bez
 // sensu do listy żeby uniknać podwójnego szukania
 sendData *justRecieved = NULL;
-
-// Tablica linked list. Na i-tym indeksie jest lista wiadomości przychodzących
-// od i-tego procesu
-LinkedList *messageBuffer[MAX_PROCESSES];
-
-/// GLOBALS END ///
+///////// MY GLOBALS END /////////
 
 void printBuffer(LinkedList *messageBuffer[MAX_PROCESSES]) {
     printf("======================BUFFER======================\n");
@@ -216,24 +210,16 @@ void printBuffer(LinkedList *messageBuffer[MAX_PROCESSES]) {
 void *helperThreadMain() {
     // Dodajemy wszystkie desktyptory do zbioru śledzonych
     printf("WELCOME FROM %d HELPER THREAD!\n", WORLD_RANK);
-    printf("%d, %d\n", READ_FROM_MYSELF, programEndingWriteDescriptors[WORLD_RANK]);
 
     FD_ZERO(&readDescriptorsSet);
     printf("HELPER %d: Adding %d\n", WORLD_RANK, READ_FROM_MYSELF);
     FD_SET(READ_FROM_MYSELF, &readDescriptorsSet);
     for (int i = 0; i < WORLD_SIZE; i++) {
         if (i != WORLD_RANK) {
-            printf("HELPER %d: Adding %d\n", WORLD_RANK, readDescriptors[i]);
-            FD_SET(readDescriptors[i], &readDescriptorsSet);
+            FD_SET(RECV_FDS[i], &readDescriptorsSet);
         }
     }
     // Dodajemy deskryptor do komunikacji z głównym procesem
-
-    if (FD_ISSET(READ_FROM_MYSELF, &readDescriptorsSet)) {
-        printf("Jest w secie\n");
-    } else {
-        printf("Nie ma\n");
-    }
 
     printf("\nHELPER %d: added desctiprors\n", WORLD_RANK);
 
@@ -268,49 +254,41 @@ void *helperThreadMain() {
             printf("==========================================\n");
             printf("HELPER %d: Looking for ready pipes: i: %d, count: %d\n",
                    WORLD_RANK, i, count);
-            if (FD_ISSET(readDescriptors[i], &readDescriptorsSet)) {
+            if (FD_ISSET(RECV_FDS[i], &readDescriptorsSet)) {
                 printf("HELPER %d: Someone is waiting here\n", WORLD_RANK);
                 // Wczytujemy tylko rozmiar danych, zeby wiedziec ile pamięci
                 // zaalokować.
                 // Ten while tutaj to troche z armaty do wróbla.
                 // TODO: Może usuń while'a.
+                // TODO: Można usunąć recv_data i wpisywac bezposrednio do recievedData
                 sendData *recievedData = (sendData *)malloc(sizeof(sendData));
-
                 int recv_data[2];
                 int totalRead = 0;
                 int totalToBeRead = sizeof(recv_data);
                 while (totalRead < totalToBeRead) {
-                    ssize_t read = chrecv(readDescriptors[i],
-                                          recv_data + totalRead, totalToBeRead);
+                    ssize_t read = chrecv(RECV_FDS[i], recv_data + totalRead,
+                                          totalToBeRead);
                     ASSERT_SYS_OK(read);
                     totalRead += read;
                 }
 
                 recievedData->count = recv_data[0];
                 recievedData->tag = recv_data[1];
-                recievedData->data = malloc(
-                    recievedData
-                        ->count); //  TODO: nie potrzeba rzutowania na void*?
-                ASSERT_MALLOC_OK(recievedData->data);
-                printf("data after malloc: %d\n", *(char *)recievedData->data);
+                //  TODO: nie potrzeba rzutowania na void*?
+                recievedData->data = malloc(recievedData->count); 
+                ASSERT_NOT_NULL(recievedData->data);
 
                 totalRead = 0;
                 totalToBeRead = recievedData->count;
-                printf("Count: %d\n", totalToBeRead);
                 while (totalRead < totalToBeRead) {
                     ssize_t read =
-                        chrecv(readDescriptors[i],
-                               recievedData->data + totalRead, totalToBeRead);
+                        chrecv(RECV_FDS[i], recievedData->data + totalRead,
+                               totalToBeRead);
                     ASSERT_SYS_OK(read);
                     totalRead += read;
                 }
-
                 printf("HELPER %d: Read all the data\n", WORLD_RANK);
-                printf("Data struct after reading: %d, %d, %d\n",
-                       recievedData->tag, recievedData->count,
-                       *(char *)recievedData->data);
-                printf("%c, %c\n", *(char *)recievedData->data,
-                       *(char *)(recievedData->data + 1));
+
                 // Tutaj recievedData powinno być już wypełnione. Można je dodać
                 // do naszego bufora
 
@@ -323,7 +301,6 @@ void *helperThreadMain() {
                            "message\n",
                            WORLD_RANK);
                     justRecieved = recievedData;
-                    // ASSERT_ZERO(pthread_mutex_unlock(&bufferMutex));
                     ASSERT_SYS_OK(sem_post(&mainThreadStopper));
                 } else {
                     printf(
@@ -359,8 +336,8 @@ void MIMPI_Init(bool enable_deadlock_detection) {
     const char *world_size_env = getenv("MIMPI_WORLD_SIZE");
     const char *world_rank_env = getenv("MIMPI_WORLD_RANK");
     const char *helperReadDesc = getenv("MIMPI_HELPER_READ");
-    ASSERT_MALLOC_OK(world_size_env);
-    ASSERT_MALLOC_OK(world_rank_env);
+    ASSERT_NOT_NULL(world_size_env);
+    ASSERT_NOT_NULL(world_rank_env);
     if (world_rank_env && world_size_env && helperReadDesc) {
         WORLD_SIZE = atoi(world_size_env);
         WORLD_RANK = atoi(world_rank_env);
@@ -389,12 +366,12 @@ void MIMPI_Init(bool enable_deadlock_detection) {
             char *temp2 = getenv(read_descriptor);
 
             if (temp1 && temp2) {
-                writeDescriptors[i] = atoi(temp1);
-                readDescriptors[i] = atoi(temp2);
+                SEND_FDS[i] = atoi(temp1);
+                RECV_FDS[i] = atoi(temp2);
 
                 // Maksymalna wartość deskryptora do select
-                if (readDescriptors[i] > maxFd) {
-                    maxFd = readDescriptors[i];
+                if (RECV_FDS[i] > maxFd) {
+                    maxFd = RECV_FDS[i];
                 }
             }
 
@@ -407,12 +384,12 @@ void MIMPI_Init(bool enable_deadlock_detection) {
     for (int i = 0; i < WORLD_SIZE; i++) {
         char writeToHelperEnv[32];
         snprintf(writeToHelperEnv, sizeof(writeToHelperEnv),
-                    "MIMPI_HELPER_WRITE_%d", i);
+                 "MIMPI_HELPER_WRITE_%d", i);
 
         char *temp1 = getenv(writeToHelperEnv);
 
         if (temp1) {
-            programEndingWriteDescriptors[i] = atoi(temp1);
+            PROGRAM_ENDING_FDS[i] = atoi(temp1);
         }
         unsetenv(writeToHelperEnv);
     }
@@ -432,7 +409,6 @@ void MIMPI_Init(bool enable_deadlock_detection) {
 }
 
 void MIMPI_Finalize() {
-
     // TODO: Musimy wysłać wiadomość do wszystkich procesów które czekały na
     // wiadomość od nas, ze wychodzimy z bloku. Chyba właśnie nie wysyłamy,
     // tylko czekamy az read zwróci zero
@@ -441,17 +417,17 @@ void MIMPI_Finalize() {
     // Ubijamy nasz helper thread
     helperThreadActive = false;
     int helperEnder = 1;
+
     int wroteByNow = 0;
     int toWrite = sizeof(int);
-
     while (wroteByNow < toWrite) {
-        ssize_t wrote = chsend(programEndingWriteDescriptors[WORLD_RANK],
+        ssize_t wrote = chsend(PROGRAM_ENDING_FDS[WORLD_RANK],
                                &helperEnder + wroteByNow, sizeof(int));
         ASSERT_SYS_OK(wrote);
         wroteByNow += wrote;
     }
     printf("MAIN %d: Send ending message through %d\n", WORLD_RANK,
-           programEndingWriteDescriptors[WORLD_RANK]);
+           PROGRAM_ENDING_FDS[WORLD_RANK]);
 
     printf("A\n");
     ASSERT_ZERO(pthread_join(helperThread, NULL));
@@ -462,20 +438,6 @@ void MIMPI_Finalize() {
     // Niszczymy bufor na senda.
     for (int i = 0; i < MAX_PROCESSES; i++) {
         deleteLinkedList(messageBuffer[i]);
-    }
-
-    // Zamykamy desktyptory do send/recv z innymi programami.
-    for (int i = 0; i <= WORLD_SIZE; i++) {
-        if (i != WORLD_RANK) {
-            close(writeDescriptors[i]);
-            close(readDescriptors[i]);
-        }
-    }
-
-    close(READ_FROM_MYSELF);
-    // Zamykamy desktyptory do konczenia programow
-    for (int i = 0; i < WORLD_SIZE; i++) {
-        close(programEndingWriteDescriptors[i]);
     }
 
     channels_finalize();
@@ -506,8 +468,8 @@ MIMPI_Retcode MIMPI_Send(void const *data, int count, int destination,
         int totalToBeSent = sizeof(send_data);
         int totalSent = 0;
         while (totalSent < totalToBeSent) {
-            ssize_t wrote = chsend(writeDescriptors[destination],
-                                   send_data + totalSent, totalToBeSent);
+            ssize_t wrote = chsend(SEND_FDS[destination], send_data + totalSent,
+                                   totalToBeSent);
             ASSERT_SYS_OK(wrote);
             totalSent += wrote;
         }
@@ -515,40 +477,18 @@ MIMPI_Retcode MIMPI_Send(void const *data, int count, int destination,
         totalToBeSent = count;
         totalSent = 0;
         while (totalSent < totalToBeSent) {
-            ssize_t wrote = chsend(writeDescriptors[destination],
-                                   data + totalSent, totalToBeSent);
+            ssize_t wrote =
+                chsend(SEND_FDS[destination], data + totalSent, totalToBeSent);
             ASSERT_SYS_OK(wrote);
             totalSent += wrote;
         }
-
-        // TODO: Tu moze malloc, chyba w sumie nie bo wysyłamy dane sendem
-        // przed zniknieciem
-        // sendData dataStruct;
-        // dataStruct.count = count;
-        // dataStruct.tag = tag;
-        // dataStruct.data = data;
-        // sendData* dataStruct = (sendData*)malloc(sizeof(dataStruct) + count);
-
-        // printf("Data struct: %d, %d, %d\n", dataStruct.tag, dataStruct.count,
-        // *(int*)dataStruct.data);
-
-        // int totalToBeSent = count + 2 * sizeof(int);
-        // int totalToBeSent = sizeof(sendData) + count;
-        // ssize_t totalSent = 0;
-        // while (totalSent < count) {
-        //     ssize_t wrote = chsend(writeDescriptors[destination],
-        //                            &dataStruct + totalSent, totalToBeSent);
-        //     ASSERT_SYS_OK(wrote);
-        //     totalSent += wrote;
-        //     totalToBeSent -= wrote;
-        // }
         printf("MAIN %d: Sent all data\n", WORLD_RANK);
         return MIMPI_SUCCESS;
     }
 }
 
 MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
-    // Czyka na wiadomość o wielkosci count i znaczniku tag od procesu o randze
+    // Czeka na wiadomość o wielkosci count i znaczniku tag od procesu o randze
     // rank(zapisanej w source)
     // Zapisuje ta wiadomość pod adresem data, nie musimy martwic się ze cos tam
     // nadpiszemy, bo to wołający ma to ogarnac
@@ -564,17 +504,18 @@ MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
     } else if (source == WORLD_RANK) {
         return MIMPI_ERROR_ATTEMPTED_SELF_OP;
     }
+    // TODO: Tutaj można poddymić z tym readem zwracającym zero.
     // else if (wysylajacy się skończyl i nie wysłał pasujacej wiadomosci) {}
-
     else {
         printf("MAIN %d: Everything okay with the message, recieving\n",
                WORLD_RANK);
+        
         ASSERT_ZERO(pthread_mutex_lock(&bufferMutex));
         sendData *found =
             searchAndRemoveMessage(messageBuffer[source], tag, count);
         ASSERT_ZERO(pthread_mutex_unlock(&bufferMutex));
-        if (!found) { // Jeszcze nie ma wiadomości dla nas. Wieszamy się na
-                      // mutexie
+
+        if (!found) { // Jeszcze nie ma wiadomości dla nas, czekamy.
             printf("MAIN %d: No message was found, I hang myself\n",
                    WORLD_RANK);
             tagIWaitFor = tag;
@@ -591,11 +532,7 @@ MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
             countIWaitFor = NOWAIT_TAG;
             found = justRecieved;
             justRecieved = NULL;
-            if (found == NULL) {
-                printf("TU NIE POWINNO BYĆ NULLA!!!!!!!!\n");
-            }
-            // ASSERT_MALLOC_OK(found); // TODO: assert malloc ok nie powinno,
-            // ale chce zobaczyc czy dziala
+            ASSERT_NOT_NULL(found);
         }
         // Tutaj found ustawione na dobrą wiadomość, która odbieramy.
 
@@ -609,8 +546,6 @@ MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
 
 MIMPI_Retcode MIMPI_Barrier(){
     TODO
-    // Przeprowadza synchronizacje wszystkich procesów? Czyli pewnie działa tak
-    // jak zwykła barriera
 }
 
 MIMPI_Retcode MIMPI_Bcast(void *data, int count, int root){

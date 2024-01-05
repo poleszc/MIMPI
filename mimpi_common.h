@@ -49,7 +49,7 @@ _Noreturn extern void fatal(const char* fmt, ...);
 
 /////////////////////////////////////////////
 
-#define ASSERT_MALLOC_OK(expr)                                                                \
+#define ASSERT_NOT_NULL(expr)                                                                \
     do {                                                                                   \
         if ((expr) == NULL)                                                                  \
             syserr(                                                                        \

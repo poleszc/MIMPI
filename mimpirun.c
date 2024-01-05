@@ -11,8 +11,6 @@
 #define STARTING_DESCRIPTOR_NUMBER 60
 #define MIN_USABLE_DESCRIPTOR_NUMBER 20
 #define MAX_USABLE_DESCRIPTOR_NUMBER 1023
-// #define MAX_CHANNELS 257
-extern char **environ;
 
 int main(int argc, char *argv[]) {
     if (argc < 3) {
@@ -43,7 +41,6 @@ int main(int argc, char *argv[]) {
     while (currDesc <= MIN_USABLE_DESCRIPTOR_NUMBER - 1 &&
            numOfOpenDescriptors < 20) {
         currDesc = dup(mockDesc[0]);
-        // printf("curr in loop: %d\n", currDesc);
         tempDescriptors[numOfOpenDescriptors] = currDesc;
         numOfOpenDescriptors++;
     }
@@ -104,8 +101,8 @@ int main(int argc, char *argv[]) {
                      helperDecriptors[i][0]);
             setenv(helperReadEnv, readHelperBuffer, 1);
 
-
-            // Przekazujemy deskryptory do pisania o zakończeniu innym programom(w tym sobie)
+            // Przekazujemy deskryptory do pisania o zakończeniu innym
+            // programom(w tym sobie)
             int descriptor_count = 0;
             for (int j = 0; j < n; j++) {
                 if (descriptor_count < n) {
@@ -154,7 +151,23 @@ int main(int argc, char *argv[]) {
         ASSERT_SYS_OK(wait(NULL));
     }
 
+    // Zamykamy używane deskryptory
+    for (int i = 0; i < n; i++) {
+        for (int j = 0; j < n; j++) {
+            if (i != j) {
+                close(channels[i][j][0]);
+                close(channels[i][j][1]);
+            }
+        }
+    }
+
+    for (int i = 0; i < n; i++) {
+        close(helperDecriptors[i][0]);
+        close(helperDecriptors[i][1]);
+    }
+
     // TODO: ZAKONCZ DZIALANIE I ZWOLNIJ EWENTUALNIE UZYWANA PAMIEC
+    // TODO: Zamknij wszystki desktyptory?
 
     return 0;
 }
