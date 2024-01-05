@@ -199,16 +199,24 @@ void *helperThreadMain() {
         FD_SET(read_descriptors[i], &readDescriptors);
     }
 
+    int startingIndex = 0, i = 0, count = 0;
     while (helperThreadActive) {
         // Jeżeli nie ma żadnych gotowych desktyptorów to wątek czeka
         int ready = select(maxFd + 1, &readDescriptors, NULL, NULL, NULL);
         ASSERT_SYS_OK(ready);
 
-        // TODO: Co jeżeli na jednym channelu czeka kilka wiadomości. Chyba to już rozwiązane
-        for (int i = 0; i < WORLD_SIZE; i++) {
+        // Przechodzimy do deskryptorach cyklicznie, zaczynajac zawsze od
+        // różnych żeby uniknąć zagłodzenia dużych dekstyptorów
+        i = startingIndex;
+        count = 0;
+
+        // TODO: Co jeżeli na jednym channelu czeka kilka wiadomości. Chyba to
+        // już rozwiązane
+        while (count < WORLD_SIZE) {
             if (FD_ISSET(read_descriptors[i], &readDescriptors)) {
                 // Wczytujemy tylko rozmiar danych, zeby wiedziec ile pamięci
-                // zaalokować Ten while tutaj to troche z armaty do wróbla.
+                // zaalokować.
+                // Ten while tutaj to troche z armaty do wróbla.
                 // TODO: Może usuń while'a.
                 int count;
                 int totalRead = 0;
@@ -249,7 +257,10 @@ void *helperThreadMain() {
                     append(buffer[i], recievedData);
                 }
             }
+            i = (i + 1) % WORLD_SIZE;
+            count++;
         }
+        startingIndex = (startingIndex + 1) % WORLD_SIZE;
     }
 }
 
