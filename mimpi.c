@@ -1,7 +1,3 @@
-/**
- * This file is for implementation of MIMPI library.
- * */
-
 #include "mimpi.h"
 #include "channel.h"
 #include "mimpi_common.h"
@@ -62,7 +58,8 @@ void append(LinkedList *list, sendData *data) {
 
 // Funkcja usuwająca węzeł na podstawie wskazanego węzła. Zwalnia pamięc na
 // data.
-void deleteNode(LinkedList *list, Node *nodeToDelete) {
+// TODO: ta funkcja moze byc calkiem niepotrzebna?
+void deleteNodeFreeData(LinkedList *list, Node *nodeToDelete) {
     if (nodeToDelete->prev != NULL) {
         nodeToDelete->prev->next = nodeToDelete->next;
     } else {
@@ -76,6 +73,24 @@ void deleteNode(LinkedList *list, Node *nodeToDelete) {
     }
 
     free(nodeToDelete->data);
+    free(nodeToDelete);
+}
+
+// Funkcja usuwająca węzeł na podstawie wskazanego węzła. Zwalnia pamięc na
+// data.
+void deleteNode(LinkedList *list, Node *nodeToDelete) {
+    if (nodeToDelete->prev != NULL) {
+        nodeToDelete->prev->next = nodeToDelete->next;
+    } else {
+        list->head = nodeToDelete->next;
+    }
+
+    if (nodeToDelete->next != NULL) {
+        nodeToDelete->next->prev = nodeToDelete->prev;
+    } else {
+        list->tail = nodeToDelete->prev;
+    }
+
     free(nodeToDelete);
 }
 
@@ -125,43 +140,57 @@ void deleteLinkedList(LinkedList *list) {
 
     free(list);
 }
-/// LINKED LIST IMPLEMENTATION ///
+
+Node *searchAndRemoveMessage(LinkedList *list, int tag, int count) {
+    Node *curr = list->head;
+    while ((curr->data->tag != tag || curr->data->count != count) &&
+           curr != list->tail) {
+        curr = curr->next;
+    }
+
+    if (curr == list->tail) { // Nie ma szukanej wiadomości
+        return NULL;
+    }
+
+    sendData *data = curr->data;
+    deleteNode(list, curr);
+    return data;
+}
+
+/// LINKED LIST IMPLEMENTATION END ///
 
 /// GLOBALS ///
+// Oznacza, ze proces nie czeka na odebranie wiadomosci.
+// Tego tagu nie można używać żeby wysyłać pomocnicze wiadomości
+// do procesów.
+#define NOWAIT_TAG -1
+
 static bool DEADLOCK_DETECTION;
 
 static int WORLD_SIZE;
 static int WORLD_RANK;
+// Na indeksie i jest numer deskryptora do czytania wiadomości od i-tego procesu
 int write_descriptors[MAX_PROCESSES + 1];
+// Na indeksie i jest numer deskryptora do pisania do i-tego procesu
 int read_descriptors[MAX_PROCESSES + 1];
 
 // Helper thread data
-bool helperThreadActive = true;
 pthread_t helperThread;
+bool helperThreadActive = true;
 fd_set readDescriptors;
-int maxFd = 0;
-pthread_mutex_t mutex;
+int maxFd = 0; // max file descriptor(for select purposes)
 
+pthread_mutex_t mutex;
+int tagIWaitFor = NOWAIT_TAG;
+int countIWaitFor = NOWAIT_TAG;
+// Jeżeli helper odczytał dane, na które akurat czeka recv to nie wrzuca ich bez
+// sensu do listy żeby uniknać podwójnego szukania
+sendData *justRecieved = NULL;
+
+// Tablica linked list. Na i-tym indeksie jest lista wiadomości przychodzących
+// od i-tego procesu
 LinkedList *buffer[MAX_PROCESSES];
 /// GLOBALS END ///
-
-void printMyDesc() {
-    printf(
-        "================================================================\n");
-    printf("WRITE DESCRIPTORS\n");
-    for (int i = 0; i < WORLD_SIZE; i++) {
-        printf("%d | ", write_descriptors[i]);
-    }
-    printf("\n");
-    printf("READ DESCRIPTORS\n");
-    for (int i = 0; i < WORLD_SIZE; i++) {
-        printf("%d | ", read_descriptors[i]);
-    }
-    printf("\n");
-
-    printf(
-        "================================================================\n");
-}
 
 void *helperThreadMain() {
     // Dodajemy wszystkie desktyptory do zbioru śledzonych
@@ -175,7 +204,7 @@ void *helperThreadMain() {
         int ready = select(maxFd + 1, &readDescriptors, NULL, NULL, NULL);
         ASSERT_SYS_OK(ready);
 
-        // TODO: Co jeżeli na jednym channelu czeka kilka wiadomości
+        // TODO: Co jeżeli na jednym channelu czeka kilka wiadomości. Chyba to już rozwiązane
         for (int i = 0; i < WORLD_SIZE; i++) {
             if (FD_ISSET(read_descriptors[i], &readDescriptors)) {
                 // Wczytujemy tylko rozmiar danych, zeby wiedziec ile pamięci
@@ -208,12 +237,17 @@ void *helperThreadMain() {
                     ASSERT_SYS_OK(read);
                     totalRead += read;
                 }
-
                 // Tutaj recievedData powinno być już wypełnione. Można je dodać
                 // do naszego bufora
-                append(buffer[i], recievedData);
 
-                // TODO: Obudzić proces, jeżeli czeka na ta wiadomość
+                // Sprawdzamy czy ktoś czeka na to co własnie wczytaliśmy
+                if (tagIWaitFor == recievedData->tag &&
+                    countIWaitFor == recievedData->count) {
+                    justRecieved = recievedData;
+                    ASSERT_ZERO(pthread_mutex_unlock(&mutex));
+                } else {
+                    append(buffer[i], recievedData);
+                }
             }
         }
     }
@@ -282,7 +316,8 @@ void MIMPI_Init(bool enable_deadlock_detection) {
 void MIMPI_Finalize() {
 
     // TODO: Musimy wysłać wiadomość do wszystkich procesów które czekały na
-    // wiadomość od nas, ze wychodzimy z bloku
+    // wiadomość od nas, ze wychodzimy z bloku. Chyba właśnie nie wysyłamy,
+    // tylko czekamy az read zwróci zero
 
     // Ubijamy nasz helper thread
     helperThreadActive = false;
@@ -342,7 +377,7 @@ MIMPI_Retcode MIMPI_Send(void const *data, int count, int destination,
         printf("Sending data to %d via %d\n", destination,
                write_descriptors[destination]);
 
-        // TODO: Tu chyba malloc, chyba w sumie nie bo wysyłamy dane sendem
+        // TODO: Tu moze malloc, chyba w sumie nie bo wysyłamy dane sendem
         // przed zniknieciem
         sendData *dataStruct;
         dataStruct->count = &count;
@@ -377,24 +412,32 @@ MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
         return MIMPI_ERROR_NO_SUCH_RANK;
     } else if (source == WORLD_RANK) {
         return MIMPI_ERROR_ATTEMPTED_SELF_OP;
-    } else {
-        
-
-
-
-        printf("Recieving data from %d via %d\n", source,
-               read_descriptors[source]);
-
-        // TODO: Zmienić odbieranie, zeby wczytywac do structa
-        ssize_t total_read = 0;
-        while (total_read < count) {
-            ssize_t read =
-                chrecv(read_descriptors[source], data + total_read, count);
-            ASSERT_SYS_OK(read);
-        }
-        return MIMPI_SUCCESS;
     }
+    // else if (wysylajacy się skończyl i nie wysłał pasujacej wiadomosci) {}
 
+    else {
+        // Tutaj z sendem wszystko okej, musimy odebrać wiadomość
+        sendData *found = searchAndRemoveMessage(buffer, tag, count);
+        if (!found) { // Jeszcze nie ma wiadomości dla nas. Wieszamy się na
+                      // mutexie
+            tagIWaitFor = tag;
+            countIWaitFor = count;
+            ASSERT_ZERO(pthread_mutex_lock(&mutex));
+
+            // Jak się tu obudziliśmy to na pewno jest dla nas wiadomość.
+            // Oznaczmy ze nikt nie czeka, zeby pomocniczy wiedział i nie musiał
+            // sprawdzac mutexa
+            tagIWaitFor = NOWAIT_TAG;
+            countIWaitFor = NOWAIT_TAG;
+            found = justRecieved;
+            justRecieved = NULL;
+            ASSERT_MALLOC_OK(found); // TODO: assert malloc ok nie powinno, ale
+                                     // chce zobaczyc czy dziala
+        }
+        // Tutaj found ustawione na dobrą wiadomość, która odbieramy.
+        data = found->data;
+        free(found);
+    }
 }
 
 MIMPI_Retcode MIMPI_Barrier(){
