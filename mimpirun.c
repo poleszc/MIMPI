@@ -73,7 +73,7 @@ int main(int argc, char *argv[]) {
     }
     printf("===========HELPER DESC===========\n");
     for (int i = 0; i < n; i++) {
-            printf("{%d, %d} | ", helperDecriptors[i][0], helperDecriptors[i][1]);
+        printf("{%d, %d} | ", helperDecriptors[i][0], helperDecriptors[i][1]);
     }
     printf("\n=========================================\n");
 
@@ -95,24 +95,37 @@ int main(int argc, char *argv[]) {
             snprintf(index_arg, sizeof(index_arg), "%d", i);
             setenv("MIMPI_WORLD_RANK", index_arg, 1);
 
-            // Przekazujemy deskryptory do komunikacji z watkiem pomocniczym
-            char helperWrite[32];
-            snprintf(helperWrite, sizeof(helperWrite), "MIMPI_HELPER_WRITE");
-            char helperRead[32];
-            snprintf(helperRead, sizeof(helperRead), "MIMPI_HELPER_READ");
-
-            char writeHelperBuffer[8], readHelperBuffer[8];
-            snprintf(writeHelperBuffer, sizeof(writeHelperBuffer), "%d",
-                     helperDecriptors[i][1]);
+            // Przekazujemy deskryptory do komunikacji z watkiem pomocniczym.
+            // Chcemy moc czytać sami od siebie
+            char helperReadEnv[32];
+            snprintf(helperReadEnv, sizeof(helperReadEnv), "MIMPI_HELPER_READ");
+            char readHelperBuffer[8];
             snprintf(readHelperBuffer, sizeof(readHelperBuffer), "%d",
                      helperDecriptors[i][0]);
-            setenv(helperWrite, writeHelperBuffer, 1);
-            setenv(helperRead, readHelperBuffer, 1);
+            setenv(helperReadEnv, readHelperBuffer, 1);
 
-            // Przekazujemy dekstyptory do czytania i pisania do programu
+
+            // Przekazujemy deskryptory do pisania o zakończeniu innym programom(w tym sobie)
             int descriptor_count = 0;
             for (int j = 0; j < n; j++) {
-                if (i != j && descriptor_count < 15) {
+                if (descriptor_count < n) {
+                    char writeToHelperEnv[32];
+                    snprintf(writeToHelperEnv, sizeof(writeToHelperEnv),
+                             "MIMPI_HELPER_WRITE_%d", j);
+
+                    char write_desc[8];
+                    snprintf(write_desc, sizeof(write_desc), "%d",
+                             helperDecriptors[i][1]);
+
+                    setenv(writeToHelperEnv, write_desc, 1);
+                    descriptor_count++;
+                }
+            }
+
+            // Przekazujemy dekstyptory do czytania i pisania do programu
+            descriptor_count = 0;
+            for (int j = 0; j < n; j++) {
+                if (i != j && descriptor_count < n) {
                     char write_descriptor[32];
                     snprintf(write_descriptor, sizeof(write_descriptor),
                              "MIMPI_CHANNEL_WRITE_%d", j);

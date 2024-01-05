@@ -173,9 +173,13 @@ static bool DEADLOCK_DETECTION;
 static int WORLD_SIZE;
 static int WORLD_RANK;
 // Na indeksie i jest numer deskryptora do czytania wiadomości od i-tego procesu
-int writeDescriptors[MAX_PROCESSES + 1];
+int writeDescriptors[MAX_PROCESSES];
 // Na indeksie i jest numer deskryptora do pisania do i-tego procesu
-int readDescriptors[MAX_PROCESSES + 1];
+int readDescriptors[MAX_PROCESSES];
+// Na indeksie i jest numer deskryptora do pisania do i-tego procesu
+int programEndingWriteDescriptors[MAX_PROCESSES];
+// Deskryptor do czytania wiadomości o zakonczeniu programu od samego siebie
+int READ_FROM_MYSELF;
 
 // Helper thread data
 pthread_t helperThread;
@@ -198,7 +202,6 @@ sendData *justRecieved = NULL;
 // od i-tego procesu
 LinkedList *messageBuffer[MAX_PROCESSES];
 
-int helperMainDesc[2];
 /// GLOBALS END ///
 
 void printBuffer(LinkedList *messageBuffer[MAX_PROCESSES]) {
@@ -213,14 +216,24 @@ void printBuffer(LinkedList *messageBuffer[MAX_PROCESSES]) {
 void *helperThreadMain() {
     // Dodajemy wszystkie desktyptory do zbioru śledzonych
     printf("WELCOME FROM %d HELPER THREAD!\n", WORLD_RANK);
+    printf("%d, %d\n", READ_FROM_MYSELF, programEndingWriteDescriptors[WORLD_RANK]);
 
     FD_ZERO(&readDescriptorsSet);
+    printf("HELPER %d: Adding %d\n", WORLD_RANK, READ_FROM_MYSELF);
+    FD_SET(READ_FROM_MYSELF, &readDescriptorsSet);
     for (int i = 0; i < WORLD_SIZE; i++) {
-        printf("%d", i);
-        FD_SET(readDescriptors[i], &readDescriptorsSet);
+        if (i != WORLD_RANK) {
+            printf("HELPER %d: Adding %d\n", WORLD_RANK, readDescriptors[i]);
+            FD_SET(readDescriptors[i], &readDescriptorsSet);
+        }
     }
     // Dodajemy deskryptor do komunikacji z głównym procesem
-    FD_SET(helperMainDesc[0], &readDescriptorsSet);
+
+    if (FD_ISSET(READ_FROM_MYSELF, &readDescriptorsSet)) {
+        printf("Jest w secie\n");
+    } else {
+        printf("Nie ma\n");
+    }
 
     printf("\nHELPER %d: added desctiprors\n", WORLD_RANK);
 
@@ -237,9 +250,9 @@ void *helperThreadMain() {
 
         // Jeżeli już żadne deskryptory nie są zajetę i dotaliśmy wiadomość od
         // ojca to znaczy ze mamy się zakończyć
-        if (ready == 1 && FD_ISSET(helperMainDesc[0], &readDescriptorsSet)) {
-            char recv;
-            ssize_t read = chrecv(helperMainDesc[0], &recv, sizeof(char));
+        if (ready == 1 && FD_ISSET(READ_FROM_MYSELF, &readDescriptorsSet)) {
+            int recv;
+            ssize_t read = chrecv(READ_FROM_MYSELF, &recv, sizeof(char));
             ASSERT_SYS_OK(read);
             break;
         }
@@ -292,79 +305,12 @@ void *helperThreadMain() {
                     totalRead += read;
                 }
 
-                // int count;
-                // int totalRead = 0;
-                // int totalToBeRead = sizeof(int);
-                // while (totalRead < totalToBeRead) {
-                //     ssize_t read =
-                //         chrecv(readDescriptors[i], &count + totalRead,
-                //         totalToBeRead);
-                //     ASSERT_SYS_OK(read);
-                //     totalRead += read;
-                //     // totalToBeRead -= read;
-                // }
-                // printf("HELPER %d: Read count: %d\n", WORLD_RANK, count);
-                // printf("size of recieved data: %ld\n", 2 * sizeof(int) +
-                // count); printf("size of senddata: %ld\n", sizeof(sendData));
-                // printf("size of char: %ld\n", sizeof(char));
-                // printf("size of const void*: %ld\n", sizeof(const void *));
-                // int tag;
-                // totalRead = 0;
-                // totalToBeRead = sizeof(int);
-                // while (totalRead < totalToBeRead) {
-                //     ssize_t read =
-                //         chrecv(readDescriptors[i], &tag + totalRead,
-                //         totalToBeRead);
-                //     ASSERT_SYS_OK(read);
-                //     totalRead += read;
-                //     // totalToBeRead -= read;
-                // }
-                // printf("Tag after read: %d\n", tag);
-
-                // void* ptr = (void*)malloc(count);
-                // printf("sizeof ptr: %ld\n", sizeof(ptr));
-                // totalRead = 0;
-                // totalToBeRead = count;
-                // while (totalRead < totalToBeRead) {
-                //     ssize_t read =
-                //         chrecv(readDescriptors[i], ptr + totalRead,
-                //         totalToBeRead);
-                //     ASSERT_SYS_OK(read);
-                //     totalRead += read;
-                //     // totalToBeRead -= read;
-                // }
-                // printf("ptr after read: %d\n", *(int*)ptr);
-
-                // sendData *recievedData =
-                //     (sendData *)malloc(sizeof(sendData) + count);
-                // ASSERT_MALLOC_OK(recievedData);
-                // recievedData->count = count;
-                // printf("HELPER %d: Read count in recieved: %d\n", WORLD_RANK,
-                // recievedData->count);
-                // // Czytamy tag i dane wielkosci count, count juz wczytany
-                // totalRead = 0;
-                // totalToBeRead = sizeof(recievedData) + recievedData->count -
-                // sizeof(int); printf("size of send data: %ld",
-                // sizeof(sendData)); printf("Total to be read: %d\n",
-                // totalToBeRead); while (totalRead < totalToBeRead) {
-                //     printf("Loopin: %d, %d\n", totalRead, totalToBeRead);
-                //     ssize_t read = chrecv(
-                //         readDescriptors[i],
-                //         recievedData + sizeof(int) + totalRead,
-                //         totalToBeRead);
-                //     ASSERT_SYS_OK(read);
-                //     totalRead += read;
-                //     // totalToBeRead -= read;
-                // }
-                // printf("pls helper\n");
-
                 printf("HELPER %d: Read all the data\n", WORLD_RANK);
                 printf("Data struct after reading: %d, %d, %d\n",
                        recievedData->tag, recievedData->count,
                        *(char *)recievedData->data);
                 printf("%c, %c\n", *(char *)recievedData->data,
                        *(char *)(recievedData->data + 1));
-                //, *(int*)recievedData->data);
                 // Tutaj recievedData powinno być już wypełnione. Można je dodać
                 // do naszego bufora
 
@@ -407,28 +353,30 @@ void MIMPI_Init(bool enable_deadlock_detection) {
         //  informacje o wysyłkach i przyjeciach i naklepac do tego jakis graf
     }
 
-    // Inicjalizujemy World Size i World Rank i deskryptory do komunikacji z pomocnikiem
+    // Inicjalizujemy World Size i World Rank i deskryptory do komunikacji z
+    // pomocnikiem
+    // TODO: Usun te mallocki, repeated literal
     const char *world_size_env = getenv("MIMPI_WORLD_SIZE");
     const char *world_rank_env = getenv("MIMPI_WORLD_RANK");
     const char *helperReadDesc = getenv("MIMPI_HELPER_READ");
-    const char *helperWriteDesc = getenv("MIMPI_HELPER_WRITE");
-
-    // TODO: Usun te mallocki
     ASSERT_MALLOC_OK(world_size_env);
     ASSERT_MALLOC_OK(world_rank_env);
-    if (world_rank_env && world_size_env && helperReadDesc && helperWriteDesc) {
+    if (world_rank_env && world_size_env && helperReadDesc) {
         WORLD_SIZE = atoi(world_size_env);
         WORLD_RANK = atoi(world_rank_env);
-        helperMainDesc[0] = atoi(helperReadDesc);
-        helperMainDesc[1] = atoi(helperWriteDesc);
-        maxFd = helperMainDesc[0] > helperMainDesc[1] ? helperMainDesc[0] : helperMainDesc[1];
+        READ_FROM_MYSELF = atoi(helperReadDesc);
+        maxFd = READ_FROM_MYSELF;
+        unsetenv("MIMPI_WORLD_SIZE");
+        unsetenv("MIMPI_WORLD_RANK");
+        unsetenv("MIMPI_HELPER_READ");
     } else {
         fprintf(stderr, "MIMPI_WORLD_SIZE or MIMPI_WORLD_RANK not set!\n");
         exit(EXIT_FAILURE);
     }
 
-    // Inicjalizujemy tablice deskryptorów
-    for (int i = 0; i < MAX_PROCESSES; i++) {
+    // Inicjalizujemy tablice deskryptorów do komunikacji send/recv z
+    // programami.
+    for (int i = 0; i < WORLD_SIZE; i++) {
         if (i != WORLD_RANK) {
             char write_descriptor[32];
             snprintf(write_descriptor, sizeof(write_descriptor),
@@ -441,28 +389,43 @@ void MIMPI_Init(bool enable_deadlock_detection) {
             char *temp2 = getenv(read_descriptor);
 
             if (temp1 && temp2) {
-                int writeDesc = atoi(temp1);
-                int readDesc = atoi(temp2);
+                writeDescriptors[i] = atoi(temp1);
+                readDescriptors[i] = atoi(temp2);
 
                 // Maksymalna wartość deskryptora do select
-                if (readDesc > maxFd) {
-                    maxFd = readDesc;
+                if (readDescriptors[i] > maxFd) {
+                    maxFd = readDescriptors[i];
                 }
-
-                writeDescriptors[i] = writeDesc;
-                readDescriptors[i] = readDesc;
             }
+
+            unsetenv(write_descriptor);
+            unsetenv(read_descriptor);
         }
     }
 
+    // Inicjalizujemy tablice deskryptorów do komunikacji kończącej programy.
+    for (int i = 0; i < WORLD_SIZE; i++) {
+        char writeToHelperEnv[32];
+        snprintf(writeToHelperEnv, sizeof(writeToHelperEnv),
+                    "MIMPI_HELPER_WRITE_%d", i);
+
+        char *temp1 = getenv(writeToHelperEnv);
+
+        if (temp1) {
+            programEndingWriteDescriptors[i] = atoi(temp1);
+        }
+        unsetenv(writeToHelperEnv);
+    }
+
     // Inicjalizujemy bufor na senda.
-    for (int i = 0; i < MAX_PROCESSES; i++) {
+    for (int i = 0; i < WORLD_SIZE; i++) {
         messageBuffer[i] = createLinkedList();
     }
-    printf("Desc i got to comunicate with helper: %d, %d\n", helperMainDesc[0], helperMainDesc[1]);
+
     printf("MAIN %d: Im in init, should start helper\n", WORLD_RANK);
 
-    // Tworzymy wątek pomocniczy i semafor je synchronizujacy. Poczatkowo ustawiony na zero
+    // Tworzymy wątek pomocniczy i semafor je synchronizujacy. Poczatkowo
+    // ustawiony na zero
     ASSERT_SYS_OK(sem_init(&mainThreadStopper, 0, 0));
     ASSERT_ZERO(pthread_mutex_init(&bufferMutex, NULL));
     ASSERT_ZERO(pthread_create(&helperThread, NULL, helperThreadMain, NULL));
@@ -477,12 +440,22 @@ void MIMPI_Finalize() {
     printf("MAIN %d: Entered finalize\n", WORLD_RANK);
     // Ubijamy nasz helper thread
     helperThreadActive = false;
-    char helperEnder = 1;
-    ssize_t wrote = chsend(helperMainDesc[1], &helperEnder, sizeof(char));
-    ASSERT_SYS_OK(wrote);
-    printf("MAIN %d: Send ending message\n", WORLD_RANK);
+    int helperEnder = 1;
+    int wroteByNow = 0;
+    int toWrite = sizeof(int);
 
+    while (wroteByNow < toWrite) {
+        ssize_t wrote = chsend(programEndingWriteDescriptors[WORLD_RANK],
+                               &helperEnder + wroteByNow, sizeof(int));
+        ASSERT_SYS_OK(wrote);
+        wroteByNow += wrote;
+    }
+    printf("MAIN %d: Send ending message through %d\n", WORLD_RANK,
+           programEndingWriteDescriptors[WORLD_RANK]);
+
+    printf("A\n");
     ASSERT_ZERO(pthread_join(helperThread, NULL));
+    printf("A\n");
     ASSERT_SYS_OK(sem_destroy(&mainThreadStopper));
     ASSERT_ZERO(pthread_mutex_destroy(&bufferMutex));
 
@@ -491,10 +464,7 @@ void MIMPI_Finalize() {
         deleteLinkedList(messageBuffer[i]);
     }
 
-    // Zamykamy bufory komunikujace sie z pomocnikiem
-    close(helperMainDesc[0]);
-    close(helperMainDesc[1]);
-    // Zamykamy nie potrzebne deskrytptory
+    // Zamykamy desktyptory do send/recv z innymi programami.
     for (int i = 0; i <= WORLD_SIZE; i++) {
         if (i != WORLD_RANK) {
             close(writeDescriptors[i]);
@@ -502,24 +472,10 @@ void MIMPI_Finalize() {
         }
     }
 
-    unsetenv("MIMPI_WORLD_SIZE");
-    unsetenv("MIMPI_WORLD_RANK");
-    unsetenv("MIMPI_HELPER_WRITE");
-    unsetenv("MIMPI_HELPER_READ");
-    
-
-    // Zwalniamy zmienne środowiskowe do przekazania deskryptorów
-    for (int i = 0; i < MAX_PROCESSES; i++) {
-        if (i != WORLD_RANK) {
-            char write_descriptor[32];
-            snprintf(write_descriptor, sizeof(write_descriptor),
-                     "MIMPI_CHANNEL_WRITE_%d_%d", WORLD_RANK, i);
-            char read_descriptor[32];
-            snprintf(read_descriptor, sizeof(read_descriptor),
-                     "MIMPI_CHANNEL_READ_%d_%d", WORLD_RANK, i);
-            unsetenv(write_descriptor);
-            unsetenv(read_descriptor);
-        }
+    close(READ_FROM_MYSELF);
+    // Zamykamy desktyptory do konczenia programow
+    for (int i = 0; i < WORLD_SIZE; i++) {
+        close(programEndingWriteDescriptors[i]);
     }
 
     channels_finalize();
