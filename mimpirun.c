@@ -101,6 +101,8 @@ int main(int argc, char *argv[]) {
                      helperDecriptors[i][0]);
             setenv(helperReadEnv, readHelperBuffer, 1);
 
+            //TODO: Close not used in process descriptors
+
             // Przekazujemy deskryptory do pisania o zakończeniu innym
             // programom(w tym sobie)
             int descriptor_count = 0;

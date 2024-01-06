@@ -211,24 +211,25 @@ void *helperThreadMain() {
     // Dodajemy wszystkie desktyptory do zbioru śledzonych
     printf("WELCOME FROM %d HELPER THREAD!\n", WORLD_RANK);
 
-    FD_ZERO(&readDescriptorsSet);
-    printf("HELPER %d: Adding %d\n", WORLD_RANK, READ_FROM_MYSELF);
-    FD_SET(READ_FROM_MYSELF, &readDescriptorsSet);
-    for (int i = 0; i < WORLD_SIZE; i++) {
-        if (i != WORLD_RANK) {
-            FD_SET(RECV_FDS[i], &readDescriptorsSet);
-        }
-    }
+
     // Dodajemy deskryptor do komunikacji z głównym procesem
-
-    printf("\nHELPER %d: added desctiprors\n", WORLD_RANK);
-
     int startingIndex = 0, i = 0, count = 0;
     while (helperThreadActive) {
+
+        printf("HELPER %d: Clearing desc set\n", WORLD_RANK);
+        FD_ZERO(&readDescriptorsSet);
+        FD_SET(READ_FROM_MYSELF, &readDescriptorsSet);
+        for (int i = 0; i < WORLD_SIZE; i++) {
+            if (i != WORLD_RANK) {
+                FD_SET(RECV_FDS[i], &readDescriptorsSet);
+            }
+        }
+        printf("HELPER %d: Added all descriptors\n", WORLD_RANK);
+
         printf("HELPER %d: New while rotation: %d, %d\n", WORLD_RANK,
                startingIndex, i);
         // Jeżeli nie ma żadnych gotowych desktyptorów to wątek czeka
-        printf("MaxFD BEFORE SELECT: %d\n", maxFd);
+        printf("HELPER %d: Select with maxFd %d\n", WORLD_RANK, maxFd);
         int ready = select(maxFd + 1, &readDescriptorsSet, NULL, NULL, NULL);
         ASSERT_SYS_OK(ready);
         printf("HELPER %d: Woke up form select, this many wait: %d\n",
@@ -429,6 +430,20 @@ void MIMPI_Finalize() {
     printf("MAIN %d: Send ending message through %d\n", WORLD_RANK,
            PROGRAM_ENDING_FDS[WORLD_RANK]);
 
+    printf("Desk: %d, %d\n", PROGRAM_ENDING_FDS[WORLD_RANK], READ_FROM_MYSELF);
+
+    // int mess;
+    // int readByNow = 0;
+    // int toRead = sizeof(int);
+    // printf("MAIN %d: Seeing if the message got sent\n", WORLD_RANK);
+    // while (readByNow < toRead) {
+    //     ssize_t read = chrecv(READ_FROM_MYSELF, &mess + readByNow, toRead);
+    //     ASSERT_SYS_OK(read);
+    //     readByNow += read;
+    // }
+    // printf("MAIN %d: Got message: %d\n", WORLD_RANK, mess);
+
+
     printf("A\n");
     ASSERT_ZERO(pthread_join(helperThread, NULL));
     printf("A\n");
@@ -439,6 +454,8 @@ void MIMPI_Finalize() {
     for (int i = 0; i < MAX_PROCESSES; i++) {
         deleteLinkedList(messageBuffer[i]);
     }
+
+    // TODO: close my desctiptors
 
     channels_finalize();
 }
