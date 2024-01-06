@@ -208,15 +208,13 @@ void printBuffer(LinkedList *messageBuffer[MAX_PROCESSES]) {
 }
 
 void *helperThreadMain() {
-    // Dodajemy wszystkie desktyptory do zbioru śledzonych
-    printf("WELCOME FROM %d HELPER THREAD!\n", WORLD_RANK);
-
-
+    printf("HELPER %d:  Entered main\n", WORLD_RANK);
     // Dodajemy deskryptor do komunikacji z głównym procesem
     int startingIndex = 0, i = 0, count = 0;
     while (helperThreadActive) {
 
         printf("HELPER %d: Clearing desc set\n", WORLD_RANK);
+        // FD_SET is modified during select, so we have to reset it in every iteration.
         FD_ZERO(&readDescriptorsSet);
         FD_SET(READ_FROM_MYSELF, &readDescriptorsSet);
         for (int i = 0; i < WORLD_SIZE; i++) {
@@ -241,6 +239,7 @@ void *helperThreadMain() {
             int recv;
             ssize_t read = chrecv(READ_FROM_MYSELF, &recv, sizeof(char));
             ASSERT_SYS_OK(read);
+            printf("HELPER %d: Received ending message from main\n", WORLD_RANK);
             break;
         }
 
@@ -252,7 +251,6 @@ void *helperThreadMain() {
         // TODO: Co jeżeli na jednym channelu czeka kilka wiadomości. Chyba to
         // już rozwiązane
         while (count < WORLD_SIZE) {
-            printf("==========================================\n");
             printf("HELPER %d: Looking for ready pipes: i: %d, count: %d\n",
                    WORLD_RANK, i, count);
             if (FD_ISSET(RECV_FDS[i], &readDescriptorsSet)) {
@@ -417,38 +415,23 @@ void MIMPI_Finalize() {
     printf("MAIN %d: Entered finalize\n", WORLD_RANK);
     // Ubijamy nasz helper thread
     helperThreadActive = false;
-    int helperEnder = 1;
+    int helperEnderMessage = 1;
 
     int wroteByNow = 0;
     int toWrite = sizeof(int);
     while (wroteByNow < toWrite) {
         ssize_t wrote = chsend(PROGRAM_ENDING_FDS[WORLD_RANK],
-                               &helperEnder + wroteByNow, sizeof(int));
+                               &helperEnderMessage + wroteByNow, sizeof(int));
         ASSERT_SYS_OK(wrote);
         wroteByNow += wrote;
     }
     printf("MAIN %d: Send ending message through %d\n", WORLD_RANK,
            PROGRAM_ENDING_FDS[WORLD_RANK]);
 
-    printf("Desk: %d, %d\n", PROGRAM_ENDING_FDS[WORLD_RANK], READ_FROM_MYSELF);
-
-    // int mess;
-    // int readByNow = 0;
-    // int toRead = sizeof(int);
-    // printf("MAIN %d: Seeing if the message got sent\n", WORLD_RANK);
-    // while (readByNow < toRead) {
-    //     ssize_t read = chrecv(READ_FROM_MYSELF, &mess + readByNow, toRead);
-    //     ASSERT_SYS_OK(read);
-    //     readByNow += read;
-    // }
-    // printf("MAIN %d: Got message: %d\n", WORLD_RANK, mess);
-
-
-    printf("A\n");
     ASSERT_ZERO(pthread_join(helperThread, NULL));
-    printf("A\n");
     ASSERT_SYS_OK(sem_destroy(&mainThreadStopper));
     ASSERT_ZERO(pthread_mutex_destroy(&bufferMutex));
+    printf("MAIN %d: Helper Thread ended\n", WORLD_RANK);
 
     // Niszczymy bufor na senda.
     for (int i = 0; i < MAX_PROCESSES; i++) {
@@ -458,6 +441,8 @@ void MIMPI_Finalize() {
     // TODO: close my desctiptors
 
     channels_finalize();
+    printf("MAIN %d: Exiting finalize\n", WORLD_RANK);
+    
 }
 
 int MIMPI_World_size() { return WORLD_SIZE; }
