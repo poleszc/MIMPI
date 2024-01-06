@@ -143,7 +143,6 @@ int main(int argc, char *argv[]) {
                     descriptor_count++;
                 }
             }
-
             ASSERT_SYS_OK(execvp(prog, args));
         }
     }

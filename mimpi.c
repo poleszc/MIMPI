@@ -167,9 +167,9 @@ sendData *searchAndRemoveMessage(LinkedList *list, int tag, int count) {
 // Nie można go używać żeby wysyłać pomocnicze wiadomości do procesów.
 #define NOWAIT_TAG -1
 
-static bool DEADLOCK_DETECTION;
-static int WORLD_SIZE;
-static int WORLD_RANK;
+bool DEADLOCK_DETECTION;
+int WORLD_SIZE;
+int WORLD_RANK;
 
 // Pod i jest numer deskryptora do czytania wiadomości od i-tego procesu
 int SEND_FDS[MAX_PROCESSES];
@@ -214,7 +214,8 @@ void *helperThreadMain() {
     while (helperThreadActive) {
 
         printf("HELPER %d: Clearing desc set\n", WORLD_RANK);
-        // FD_SET is modified during select, so we have to reset it in every iteration.
+        // FD_SET is modified during select, so we have to reset it in every
+        // iteration.
         FD_ZERO(&readDescriptorsSet);
         FD_SET(READ_FROM_MYSELF, &readDescriptorsSet);
         for (int i = 0; i < WORLD_SIZE; i++) {
@@ -239,7 +240,8 @@ void *helperThreadMain() {
             int recv;
             ssize_t read = chrecv(READ_FROM_MYSELF, &recv, sizeof(char));
             ASSERT_SYS_OK(read);
-            printf("HELPER %d: Received ending message from main\n", WORLD_RANK);
+            printf("HELPER %d: Received ending message from main\n",
+                   WORLD_RANK);
             break;
         }
 
@@ -259,7 +261,8 @@ void *helperThreadMain() {
                 // zaalokować.
                 // Ten while tutaj to troche z armaty do wróbla.
                 // TODO: Może usuń while'a.
-                // TODO: Można usunąć recv_data i wpisywac bezposrednio do recievedData
+                // TODO: Można usunąć recv_data i wpisywac bezposrednio do
+                // recievedData
                 sendData *recievedData = (sendData *)malloc(sizeof(sendData));
                 int recv_data[2];
                 int totalRead = 0;
@@ -274,7 +277,7 @@ void *helperThreadMain() {
                 recievedData->count = recv_data[0];
                 recievedData->tag = recv_data[1];
                 //  TODO: nie potrzeba rzutowania na void*?
-                recievedData->data = malloc(recievedData->count); 
+                recievedData->data = malloc(recievedData->count);
                 ASSERT_NOT_NULL(recievedData->data);
 
                 totalRead = 0;
@@ -337,18 +340,16 @@ void MIMPI_Init(bool enable_deadlock_detection) {
     const char *helperReadDesc = getenv("MIMPI_HELPER_READ");
     ASSERT_NOT_NULL(world_size_env);
     ASSERT_NOT_NULL(world_rank_env);
-    if (world_rank_env && world_size_env && helperReadDesc) {
-        WORLD_SIZE = atoi(world_size_env);
-        WORLD_RANK = atoi(world_rank_env);
-        READ_FROM_MYSELF = atoi(helperReadDesc);
-        maxFd = READ_FROM_MYSELF;
-        unsetenv("MIMPI_WORLD_SIZE");
-        unsetenv("MIMPI_WORLD_RANK");
-        unsetenv("MIMPI_HELPER_READ");
-    } else {
-        fprintf(stderr, "MIMPI_WORLD_SIZE or MIMPI_WORLD_RANK not set!\n");
-        exit(EXIT_FAILURE);
-    }
+    ASSERT_NOT_NULL(helperReadDesc);
+
+    WORLD_SIZE = atoi(world_size_env);
+    WORLD_RANK = atoi(world_rank_env);
+    READ_FROM_MYSELF = atoi(helperReadDesc);
+    maxFd = READ_FROM_MYSELF;
+
+    ASSERT_ZERO(unsetenv("MIMPI_WORLD_SIZE"));
+    ASSERT_ZERO(unsetenv("MIMPI_WORLD_RANK"));
+    ASSERT_ZERO(unsetenv("MIMPI_HELPER_READ"));
 
     // Inicjalizujemy tablice deskryptorów do komunikacji send/recv z
     // programami.
@@ -374,12 +375,12 @@ void MIMPI_Init(bool enable_deadlock_detection) {
                 }
             }
 
-            unsetenv(write_descriptor);
-            unsetenv(read_descriptor);
+            ASSERT_ZERO(unsetenv(write_descriptor));
+            ASSERT_ZERO(unsetenv(read_descriptor));
         }
     }
-
-    // Inicjalizujemy tablice deskryptorów do komunikacji kończącej programy.
+    // Inicjalizujemy tablice deskryptorów do komunikacji kończącej
+    // programy.
     for (int i = 0; i < WORLD_SIZE; i++) {
         char writeToHelperEnv[32];
         snprintf(writeToHelperEnv, sizeof(writeToHelperEnv),
@@ -390,7 +391,7 @@ void MIMPI_Init(bool enable_deadlock_detection) {
         if (temp1) {
             PROGRAM_ENDING_FDS[i] = atoi(temp1);
         }
-        unsetenv(writeToHelperEnv);
+        ASSERT_ZERO(unsetenv(writeToHelperEnv));
     }
 
     // Inicjalizujemy bufor na senda.
@@ -442,7 +443,6 @@ void MIMPI_Finalize() {
 
     channels_finalize();
     printf("MAIN %d: Exiting finalize\n", WORLD_RANK);
-    
 }
 
 int MIMPI_World_size() { return WORLD_SIZE; }
@@ -452,11 +452,13 @@ int MIMPI_World_rank() { return WORLD_RANK; }
 MIMPI_Retcode MIMPI_Send(void const *data, int count, int destination,
                          int tag) {
 
-    // Jezeli wchodzimy tu i chcemy wysłać wiadomość do procesu do destination
-    // ktory juz nie istnieje bo wyszedl z bloku MPI to zwracamy
-    // MIMPI_ERROR_REMOTE_FINISHED Chyba tu nie zwracamy MIMPI_DEADLOCK_DETECTED
+    // Jezeli wchodzimy tu i chcemy wysłać wiadomość do procesu do
+    // destination ktory juz nie istnieje bo wyszedl z bloku MPI to zwracamy
+    // MIMPI_ERROR_REMOTE_FINISHED Chyba tu nie zwracamy
+    // MIMPI_DEADLOCK_DETECTED
 
-    // TODO: Sprawdzenie czy program do ktorego wysyłamy wyszedł z bloku MIMPI
+    // TODO: Sprawdzenie czy program do ktorego wysyłamy wyszedł z bloku
+    // MIMPI
     printf("MAIN %d: Entering MIMPI_Send\n", WORLD_RANK);
     if (destination < 0 || destination > WORLD_SIZE - 1) {
         return MIMPI_ERROR_NO_SUCH_RANK;
@@ -490,16 +492,16 @@ MIMPI_Retcode MIMPI_Send(void const *data, int count, int destination,
 }
 
 MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
-    // Czeka na wiadomość o wielkosci count i znaczniku tag od procesu o randze
-    // rank(zapisanej w source)
-    // Zapisuje ta wiadomość pod adresem data, nie musimy martwic się ze cos tam
-    // nadpiszemy, bo to wołający ma to ogarnac
+    // Czeka na wiadomość o wielkosci count i znaczniku tag od procesu o
+    // randze rank(zapisanej w source) Zapisuje ta wiadomość pod adresem
+    // data, nie musimy martwic się ze cos tam nadpiszemy, bo to wołający ma
+    // to ogarnac
 
-    // TODO: Sprawdzenie czy program na ktory czekamy wyszedł z bloku MIMPI i
-    // nie wysłał pasującej wiadomosci
-    // TODO: Jeżeli proces tu wejdzie i czeka na wiadomość, a w między czasie
-    // ten na ktory czekał wyjdzie to wychodzac musi wysłac ping do procesow
-    // ktore czekały na wiadomosc od niego.
+    // TODO: Sprawdzenie czy program na ktory czekamy wyszedł z bloku MIMPI
+    // i nie wysłał pasującej wiadomosci
+    // TODO: Jeżeli proces tu wejdzie i czeka na wiadomość, a w między
+    // czasie ten na ktory czekał wyjdzie to wychodzac musi wysłac ping do
+    // procesow ktore czekały na wiadomosc od niego.
     printf("MAIN %d: Entered MIMPI_Recv\n", WORLD_RANK);
     if (source < 0 || source > WORLD_SIZE - 1) {
         return MIMPI_ERROR_NO_SUCH_RANK;
@@ -507,11 +509,12 @@ MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
         return MIMPI_ERROR_ATTEMPTED_SELF_OP;
     }
     // TODO: Tutaj można poddymić z tym readem zwracającym zero.
-    // else if (wysylajacy się skończyl i nie wysłał pasujacej wiadomosci) {}
+    // else if (wysylajacy się skończyl i nie wysłał pasujacej wiadomosci)
+    // {}
     else {
         printf("MAIN %d: Everything okay with the message, recieving\n",
                WORLD_RANK);
-        
+
         ASSERT_ZERO(pthread_mutex_lock(&bufferMutex));
         sendData *found =
             searchAndRemoveMessage(messageBuffer[source], tag, count);
@@ -528,8 +531,8 @@ MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
             printf("MAIN %d: Woke up from hanging\n", WORLD_RANK);
 
             // Jak się tu obudziliśmy to na pewno jest dla nas wiadomość.
-            // Oznaczmy ze nikt nie czeka, zeby pomocniczy wiedział i nie musiał
-            // sprawdzac mutexa
+            // Oznaczmy ze nikt nie czeka, zeby pomocniczy wiedział i nie
+            // musiał sprawdzac mutexa
             tagIWaitFor = NOWAIT_TAG;
             countIWaitFor = NOWAIT_TAG;
             found = justRecieved;
@@ -546,9 +549,7 @@ MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
     }
 }
 
-MIMPI_Retcode MIMPI_Barrier(){
-    TODO
-}
+MIMPI_Retcode MIMPI_Barrier(){TODO}
 
 MIMPI_Retcode MIMPI_Bcast(void *data, int count, int root){
     TODO
