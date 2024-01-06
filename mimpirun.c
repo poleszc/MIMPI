@@ -82,7 +82,8 @@ int main(int argc, char *argv[]) {
         ASSERT_SYS_OK(close(tempDescriptors[i]));
     }
     char *prog = argv[2];         // nazwa prog
-    char **args = &argv[3];       // dodatkowe argumenty do prog
+    char **args = &argv[2];       // dodatkowe argumenty do prog
+    //fprintf(stderr, "Args: %d, %d, %d\n", *args[0], *args[1], *args[2]);
     for (int i = 0; i < n; i++) { // Odpalamy n procesow
 
         pid_t pid;
