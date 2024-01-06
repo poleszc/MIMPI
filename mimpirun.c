@@ -70,7 +70,8 @@ int main(int argc, char *argv[]) {
     // }
     // printf("===========HELPER DESC===========\n");
     // for (int i = 0; i < n; i++) {
-    //     printf("{%d, %d} | ", helperDecriptors[i][0], helperDecriptors[i][1]);
+    //     printf("{%d, %d} | ", helperDecriptors[i][0],
+    //     helperDecriptors[i][1]);
     // }
     // printf("\n=========================================\n");
 
@@ -80,10 +81,10 @@ int main(int argc, char *argv[]) {
     for (int i = 0; i < numOfOpenDescriptors; i++) {
         ASSERT_SYS_OK(close(tempDescriptors[i]));
     }
-
     char *prog = argv[2];         // nazwa prog
     char **args = &argv[3];       // dodatkowe argumenty do prog
     for (int i = 0; i < n; i++) { // Odpalamy n procesow
+
         pid_t pid;
         ASSERT_SYS_OK(pid = fork());
         if (pid == 0) { // Proces potomny
@@ -101,7 +102,7 @@ int main(int argc, char *argv[]) {
                      helperDecriptors[i][0]);
             setenv(helperReadEnv, readHelperBuffer, 1);
 
-            //TODO: Close not used in process descriptors
+            // TODO: Close not used in process descriptors
 
             // Przekazujemy deskryptory do pisania o zakończeniu innym
             // programom(w tym sobie)
@@ -151,6 +152,7 @@ int main(int argc, char *argv[]) {
     for (int i = 0; i < n; ++i) {
         ASSERT_SYS_OK(wait(NULL));
     }
+    // fprintf(stderr, "Po wait\n");
 
     // Zamykamy używane deskryptory
     for (int i = 0; i < n; i++) {

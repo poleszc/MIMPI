@@ -198,14 +198,14 @@ int sourceIWaitFor = NOWAIT_TAG;
 sendData *justRecieved = NULL;
 ///////// MY GLOBALS END /////////
 
-void printBuffer(LinkedList *messageBuffer[MAX_PROCESSES]) {
-    printf("======================BUFFER======================\n");
-    for (int i = 0; i < WORLD_SIZE; i++) {
-        printf("%d:   ", i);
-        displayList(messageBuffer[i]);
-    }
-    printf("==================================================\n");
-}
+// void printBuffer(LinkedList *messageBuffer[MAX_PROCESSES]) {
+//     printf("======================BUFFER======================\n");
+//     for (int i = 0; i < WORLD_SIZE; i++) {
+//         printf("%d:   ", i);
+//         displayList(messageBuffer[i]);
+//     }
+//     printf("==================================================\n");
+// }
 
 void *helperThreadMain() {
     //printf("HELPER %d:  Entered main\n", WORLD_RANK);
@@ -310,7 +310,7 @@ void *helperThreadMain() {
                     //    WORLD_RANK);
                     ASSERT_ZERO(pthread_mutex_lock(&bufferMutex));
                     append(messageBuffer[i], recievedData);
-                    printBuffer(messageBuffer);
+                    //printBuffer(messageBuffer);
                     ASSERT_ZERO(pthread_mutex_unlock(&bufferMutex));
                 }
             }
@@ -428,14 +428,13 @@ void MIMPI_Finalize() {
     }
     //printf("MAIN %d: Send ending message through %d\n", WORLD_RANK,
     //      PROGRAM_ENDING_FDS[WORLD_RANK]);
-
     ASSERT_ZERO(pthread_join(helperThread, NULL));
     ASSERT_SYS_OK(sem_destroy(&mainThreadStopper));
     ASSERT_ZERO(pthread_mutex_destroy(&bufferMutex));
     //printf("MAIN %d: Helper Thread ended\n", WORLD_RANK);
 
     // Niszczymy bufor na senda.
-    for (int i = 0; i < MAX_PROCESSES; i++) {
+    for (int i = 0; i < WORLD_SIZE; i++) {
         deleteLinkedList(messageBuffer[i]);
     }
 
