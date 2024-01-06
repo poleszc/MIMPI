@@ -178,7 +178,10 @@ int RECV_FDS[MAX_PROCESSES];
 // Pod i jest numer deskryptora do pisania do i-tego procesu o zakonczeniu
 int PROGRAM_ENDING_FDS[MAX_PROCESSES];
 // Deskryptor do czytania wiadomości o zakonczeniu programu od samego siebie
-int READ_FROM_MYSELF;
+int ENDING_CHANNEL;
+// Czy i-ty program już się zakończył.
+bool PROGRAMS_ENDED[MAX_PROCESSES];
+bool remoteMainWaitedForEnded = false;
 
 // Helper thread data
 LinkedList *messageBuffer[MAX_PROCESSES]; // Wiadomości od i-tego procesu
@@ -218,7 +221,7 @@ void *helperThreadMain() {
         // FD_SET is modified during select, so we have to reset it in every
         // iteration.
         FD_ZERO(&readDescriptorsSet);
-        FD_SET(READ_FROM_MYSELF, &readDescriptorsSet);
+        FD_SET(ENDING_CHANNEL, &readDescriptorsSet);
         for (int i = 0; i < WORLD_SIZE; i++) {
             if (i != WORLD_RANK) {
                 FD_SET(RECV_FDS[i], &readDescriptorsSet);
@@ -227,23 +230,47 @@ void *helperThreadMain() {
         fprintf(stderr, "HELPER %d: Added all descriptors\n", WORLD_RANK);
 
         fprintf(stderr, "HELPER %d: New while rotation: %d, %d\n", WORLD_RANK,
-               startingIndex, i);
+                startingIndex, i);
         // Jeżeli nie ma żadnych gotowych desktyptorów to wątek czeka
         fprintf(stderr, "HELPER %d: Select with maxFd %d\n", WORLD_RANK, maxFd);
         int ready = select(maxFd + 1, &readDescriptorsSet, NULL, NULL, NULL);
         ASSERT_SYS_OK(ready);
         fprintf(stderr, "HELPER %d: Woke up form select, this many wait: %d\n",
-               WORLD_RANK, ready);
+                WORLD_RANK, ready);
 
         // Jeżeli już żadne deskryptory nie są zajetę i dotaliśmy wiadomość od
         // ojca to znaczy ze mamy się zakończyć
-        if (ready == 1 && FD_ISSET(READ_FROM_MYSELF, &readDescriptorsSet)) {
-            int recv;
-            ssize_t read = chrecv(READ_FROM_MYSELF, &recv, sizeof(char));
-            ASSERT_SYS_OK(read);
-            fprintf(stderr, "HELPER %d: Received ending message from main\n",
-                   WORLD_RANK);
-            break;
+        if (FD_ISSET(ENDING_CHANNEL, &readDescriptorsSet)) {
+            int recievedId;
+            int totalRead = 0;
+            int totalToBeRead = sizeof(int);
+            while (totalRead < totalToBeRead) {
+                ssize_t read = chrecv(ENDING_CHANNEL, &recievedId + totalRead,
+                                      totalToBeRead);
+                ASSERT_SYS_OK(read);
+                totalRead += read;
+            }
+
+            if (recievedId == WORLD_RANK) { // To znaczy, że muszę się skończyc
+                fprintf(stderr,
+                        "HELPER %d: Received ending message from main\n",
+                        WORLD_RANK);
+                break;
+            } else { // Ktoś się skończył, zaznaczam to i sprawdzam czy akurat
+                     // moj main czeka.
+                fprintf(stderr, "HELPER %d: Received ending message from %d\n", WORLD_RANK, recievedId);
+                PROGRAMS_ENDED[recievedId] = true;
+                // Zakończyło się coś na co czekał nasz main
+                // Trzeba sprawdzić czy main nie czekał na wiadomość od
+                // niego(tylko jak)
+                // TODO: Tu chyba moze byc taka sytuacja, ze wysle wiadomosc, ale tez od razu info do nas ze sie skonczył.
+                // TODO: Chyba trzeba tu dodać sprawdzenie, ze pipe od niego jest na pewno pusty
+                if (sourceIWaitFor == recievedId) {
+                    fprintf(stderr, "HELPER %d: Main waited for message from %d\n", WORLD_RANK, recievedId);
+                    remoteMainWaitedForEnded = true;
+                    ASSERT_SYS_OK(sem_post(&mainThreadStopper));
+                }
+            }
         }
 
         // Przechodzimy do deskryptorach cyklicznie, zaczynajac zawsze od
@@ -255,10 +282,12 @@ void *helperThreadMain() {
         // już rozwiązane
         // while (count < WORLD_SIZE) {
         while (count < WORLD_SIZE && count < ready) {
-            fprintf(stderr, "HELPER %d: Looking for ready pipes: i: %d, count: %d\n",
-                   WORLD_RANK, i, count);
+            fprintf(stderr,
+                    "HELPER %d: Looking for ready pipes: i: %d, count: %d\n",
+                    WORLD_RANK, i, count);
             if (FD_ISSET(RECV_FDS[i], &readDescriptorsSet)) {
-                fprintf(stderr, "HELPER %d: Someone is waiting here\n", WORLD_RANK);
+                fprintf(stderr, "HELPER %d: Someone is waiting here\n",
+                        WORLD_RANK);
                 // Wczytujemy tylko rozmiar danych, zeby wiedziec ile pamięci
                 // zaalokować.
                 // Ten while tutaj to troche z armaty do wróbla.
@@ -297,19 +326,22 @@ void *helperThreadMain() {
                 // do naszego bufora
 
                 // Sprawdzamy czy ktoś czeka na to co własnie wczytaliśmy
-                // Mogly byc dwie takie same po sobie, wiec sprawdzamy czy odebrał
+                // Mogly byc dwie takie same po sobie, wiec sprawdzamy czy
+                // odebrał
                 if (recieved && countIWaitFor == recievedData->count &&
                     sourceIWaitFor == i &&
                     (tagIWaitFor == recievedData->tag ||
                      tagIWaitFor == MIMPI_ANY_TAG)) {
-                    fprintf(stderr, "HELPER %d: Someone was waiting for that exact "
-                           "message\n",
-                           WORLD_RANK);
+                    fprintf(stderr,
+                            "HELPER %d: Someone was waiting for that exact "
+                            "message\n",
+                            WORLD_RANK);
                     recieved = false;
                     justRecieved = recievedData;
                     ASSERT_SYS_OK(sem_post(&mainThreadStopper));
                 } else {
-                    fprintf(stderr, 
+                    fprintf(
+                        stderr,
                         "HELPER %d: No one is waiting, appending to buffer\n",
                         WORLD_RANK);
                     ASSERT_ZERO(pthread_mutex_lock(&bufferMutex));
@@ -348,8 +380,8 @@ void MIMPI_Init(bool enable_deadlock_detection) {
 
     WORLD_SIZE = atoi(world_size_env);
     WORLD_RANK = atoi(world_rank_env);
-    READ_FROM_MYSELF = atoi(helperReadDesc);
-    maxFd = READ_FROM_MYSELF;
+    ENDING_CHANNEL = atoi(helperReadDesc);
+    maxFd = ENDING_CHANNEL;
 
     ASSERT_ZERO(unsetenv("MIMPI_WORLD_SIZE"));
     ASSERT_ZERO(unsetenv("MIMPI_WORLD_RANK"));
@@ -418,10 +450,30 @@ void MIMPI_Finalize() {
     // tylko czekamy az read zwróci zero
 
     fprintf(stderr, "MAIN %d: Entered finalize\n", WORLD_RANK);
+    // Wysyłamy wiadomości do wszystkich innych procesów, że się skończyliśmy
+    int myId = WORLD_RANK;
+    for (int i = 0; i < WORLD_SIZE; i++) {
+        if (i != WORLD_RANK) {
+            fprintf(stderr, "MAIN %d: Sending ending message to %d\n",
+                    WORLD_RANK, i);
+            int wroteByNow = 0;
+            int toWrite = sizeof(int);
+
+            while (wroteByNow < toWrite) {
+                ssize_t wrote =
+                    chsend(PROGRAM_ENDING_FDS[i], &myId + wroteByNow, toWrite);
+                ASSERT_SYS_OK(wrote);
+                wroteByNow += wrote;
+            }
+            fprintf(stderr, "MAIN %d: Finished writing message to %d\n",
+                    WORLD_RANK, i);
+        }
+    }
+
+    fprintf(stderr, "MAIN %d: Sending ending message to helper\n", WORLD_RANK);
     // Ubijamy nasz helper thread
     helperThreadActive = false;
     int helperEnderMessage = 1;
-
     int wroteByNow = 0;
     int toWrite = sizeof(int);
     while (wroteByNow < toWrite) {
@@ -430,8 +482,6 @@ void MIMPI_Finalize() {
         ASSERT_SYS_OK(wrote);
         wroteByNow += wrote;
     }
-    fprintf(stderr, "MAIN %d: Send ending message through %d\n", WORLD_RANK,
-          PROGRAM_ENDING_FDS[WORLD_RANK]);
     ASSERT_ZERO(pthread_join(helperThread, NULL));
     ASSERT_SYS_OK(sem_destroy(&mainThreadStopper));
     ASSERT_ZERO(pthread_mutex_destroy(&bufferMutex));
@@ -467,9 +517,11 @@ MIMPI_Retcode MIMPI_Send(void const *data, int count, int destination,
         return MIMPI_ERROR_NO_SUCH_RANK;
     } else if (destination == WORLD_RANK) {
         return MIMPI_ERROR_ATTEMPTED_SELF_OP;
+    } else if (PROGRAMS_ENDED[destination]) {
+        return MIMPI_ERROR_REMOTE_FINISHED;
     } else {
         fprintf(stderr, "MAIN %d: Everything okey with the message, sending\n",
-               WORLD_RANK);
+                WORLD_RANK);
 
         int send_data[2] = {count, tag};
         int totalToBeSent = sizeof(send_data);
@@ -505,18 +557,25 @@ MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
     // TODO: Jeżeli proces tu wejdzie i czeka na wiadomość, a w między
     // czasie ten na ktory czekał wyjdzie to wychodzac musi wysłac ping do
     // procesow ktore czekały na wiadomosc od niego.
+    remoteMainWaitedForEnded = false;
     fprintf(stderr, "MAIN %d: Entered MIMPI_Recv\n", WORLD_RANK);
     if (source < 0 || source > WORLD_SIZE - 1) {
         return MIMPI_ERROR_NO_SUCH_RANK;
     } else if (source == WORLD_RANK) {
         return MIMPI_ERROR_ATTEMPTED_SELF_OP;
     }
+    else if (PROGRAMS_ENDED[source]) {
+        fprintf(stderr, "MAIN %d: Source ended\n", WORLD_RANK);
+        // TODO: Tu trzeba sprawdzić czy pipe od niego jest pusty, bo 
+        return MIMPI_ERROR_REMOTE_FINISHED;
+    }
     // TODO: Tutaj można poddymić z tym readem zwracającym zero.
     // else if (wysylajacy się skończyl i nie wysłał pasujacej wiadomosci)
     // {}
     else {
-        fprintf(stderr, "MAIN %d: Everything okay with the message, recieving\n",
-               WORLD_RANK);
+        fprintf(stderr,
+                "MAIN %d: Everything okay with the message, recieving\n",
+                WORLD_RANK);
 
         ASSERT_ZERO(pthread_mutex_lock(&bufferMutex));
         sendData *found =
@@ -525,7 +584,7 @@ MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
 
         if (!found) { // Jeszcze nie ma wiadomości dla nas, czekamy.
             fprintf(stderr, "MAIN %d: No message was found, I hang myself\n",
-                   WORLD_RANK);
+                    WORLD_RANK);
             recieved = true;
             tagIWaitFor = tag;
             countIWaitFor = count;
@@ -534,19 +593,26 @@ MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
 
             fprintf(stderr, "MAIN %d: Woke up from hanging\n", WORLD_RANK);
 
-            // Jak się tu obudziliśmy to na pewno jest dla nas wiadomość.
-            // Oznaczmy ze nikt nie czeka, zeby pomocniczy wiedział i nie
-            // musiał sprawdzac mutexa
             recieved = true;
             tagIWaitFor = NOWAIT_TAG;
             countIWaitFor = NOWAIT_TAG;
+
+            // Zostaliśmy obudzeni bo helper dostał info o zakończeniu
+            if (remoteMainWaitedForEnded) {
+                return MIMPI_ERROR_REMOTE_FINISHED;
+            }
+
+            // Jak się tu obudziliśmy to na pewno jest dla nas wiadomość.
+            // Oznaczmy ze nikt nie czeka, zeby pomocniczy wiedział i nie
+            // musiał sprawdzac mutexa
             found = justRecieved;
             justRecieved = NULL;
             ASSERT_NOT_NULL(found);
         }
         // Tutaj found ustawione na dobrą wiadomość, która odbieramy.
 
-        fprintf(stderr, "MAIN %d: Actually copying memory to target ptr\n", WORLD_RANK);
+        fprintf(stderr, "MAIN %d: Actually copying memory to target ptr\n",
+                WORLD_RANK);
         memcpy(data, found->data, found->count);
 
         free(found);
