@@ -10,6 +10,8 @@
 #include <stdbool.h>
 #include <stdnoreturn.h>
 
+#define MAX_PROCESSES 16
+
 /*
     Assert that expression doesn't evaluate to -1 (as almost every system function does in case of error).
 
@@ -46,8 +48,15 @@ _Noreturn extern void fatal(const char* fmt, ...);
 
 
 /////////////////////////////////////////////
-// Put your declarations here
 
+#define ASSERT_NOT_NULL(expr)                                                                \
+    do {                                                                                   \
+        if ((expr) == NULL)                                                                  \
+            syserr(                                                                        \
+                "malloc failed: %s\n\tIn function %s() in %s line %d.\n\tErrno: ", \
+                #expr, __func__, __FILE__, __LINE__                                        \
+            );                                                                             \
+    } while(0)
 
 
 
