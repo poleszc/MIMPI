@@ -12,6 +12,10 @@
 #define MIN_USABLE_DESCRIPTOR_NUMBER 20
 #define MAX_USABLE_DESCRIPTOR_NUMBER 1023
 
+#define WORLD_SIZE_ENV "MIMPI_WORLD_SIZE"
+#define WORLD_RANK_ENV "MIMPI_WORLD_RANK"
+#define CHANNEL_READ_ENV "MIMPI_CHANNEL_READ"
+
 int main(int argc, char *argv[]) {
     if (argc < 3) {
         fprintf(stderr, "Not enough arguments!\n");
@@ -24,12 +28,7 @@ int main(int argc, char *argv[]) {
         return -1;
     }
 
-    // Ustawiamy zmienna środowiskowa oznaczjąca liczbę odpalonych równolegle
-    // programów
-    char size_arg[3];
-    snprintf(size_arg, sizeof(size_arg), "%d", n);
-    setenv("MIMPI_WORLD_SIZE", size_arg, 1);
-
+    /// DESCRIPTORS ///
     // Chwilowo tworzymy deskryptory dopóki nie stworzymy wiekszego niz 19, zeby
     // nasze zaczynały się od 20
     int tempDescriptors[MIN_USABLE_DESCRIPTOR_NUMBER];
@@ -38,8 +37,7 @@ int main(int argc, char *argv[]) {
     int currDesc = mockDesc[0];
 
     int numOfOpenDescriptors = 0;
-    while (currDesc <= MIN_USABLE_DESCRIPTOR_NUMBER - 1 &&
-           numOfOpenDescriptors < 20) {
+    while (currDesc <= MIN_USABLE_DESCRIPTOR_NUMBER - 1 && numOfOpenDescriptors < 20) {
         currDesc = dup(mockDesc[0]);
         tempDescriptors[numOfOpenDescriptors] = currDesc;
         numOfOpenDescriptors++;
@@ -47,33 +45,10 @@ int main(int argc, char *argv[]) {
 
     // Jak wyjdziemy tutaj to currDesc to minimalnie 19, wiec mozna zaczać
     // tworzyć te odpowiednie deskryptor
-    int channels[MAX_PROCESSES][MAX_PROCESSES][2];
+    int channels[MAX_PROCESSES][2];
     for (int i = 0; i < n; i++) {
-        for (int j = 0; j < n; j++) {
-            if (i != j) {
-                ASSERT_SYS_OK(channel(channels[i][j]));
-            }
-        }
+        ASSERT_SYS_OK(channel(channels[i]));
     }
-
-    int helperDecriptors[MAX_PROCESSES][2];
-    for (int i = 0; i < n; i++) {
-        ASSERT_SYS_OK(channel(helperDecriptors[i]));
-    }
-
-    fprintf(stderr, "===========PRINT ALL CHANNELS===========\n");
-    for (int i = 0; i < n; i++) {
-        for (int j = 0; j < n; j++) {
-            fprintf(stderr, "{%d, %d} | ", channels[i][j][0], channels[i][j][1]);
-        }
-        fprintf(stderr, "\n");
-    }
-    fprintf(stderr, "===========HELPER DESC===========\n");
-    for (int i = 0; i < n; i++) {
-        fprintf(stderr, "{%d, %d} | ", helperDecriptors[i][0],
-        helperDecriptors[i][1]);
-    }
-    fprintf(stderr, "\n=========================================\n");
 
     // Zamykamy tymczasowe deskryptory
     close(mockDesc[0]);
@@ -81,6 +56,22 @@ int main(int argc, char *argv[]) {
     for (int i = 0; i < numOfOpenDescriptors; i++) {
         ASSERT_SYS_OK(close(tempDescriptors[i]));
     }
+    /// DESCRIPTORS ///
+
+    // DEBUG
+    //  fprintf(stderr, "===========CHANNELS===========\n");
+    //  for (int i = 0; i < n; i++) {
+    //      fprintf(stderr, "{%d, %d} | ", channels[i][0], channels[i][1]);
+    //  }
+    //  fprintf(stderr, "\n=========================================\n");
+    // DEBUG
+
+    // Ustawiamy zmienna środowiskowa oznaczjąca liczbę odpalonych równolegle
+    // programów
+    char size_arg[3];
+    snprintf(size_arg, sizeof(size_arg), "%d", n);
+    setenv(WORLD_SIZE_ENV, size_arg, 1);
+
     char *prog = argv[2];         // nazwa prog
     char **args = &argv[2];       // dodatkowe argumenty do prog
     for (int i = 0; i < n; i++) { // Odpalamy n procesow
@@ -91,49 +82,23 @@ int main(int argc, char *argv[]) {
             // Ustawiamy zmienna oznaczająca indeks programu
             char index_arg[3];
             snprintf(index_arg, sizeof(index_arg), "%d", i);
-            setenv("MIMPI_WORLD_RANK", index_arg, 1);
+            setenv(WORLD_RANK_ENV, index_arg, 1);
 
-            // Przekazujemy deskryptory do komunikacji z watkiem pomocniczym.
-            // Chcemy moc czytać sami od siebie
-            char helperReadEnv[32];
-            snprintf(helperReadEnv, sizeof(helperReadEnv), "MIMPI_HELPER_READ");
-            char readHelperBuffer[8];
-            snprintf(readHelperBuffer, sizeof(readHelperBuffer), "%d",
-                     helperDecriptors[i][0]);
-            setenv(helperReadEnv, readHelperBuffer, 1);
-
-            char helperWriteEnv[32];
-            snprintf(helperWriteEnv, sizeof(helperWriteEnv),
-                     "MIMPI_HELPER_WRITE");
-            char writeHelperBuffer[8];
-            snprintf(writeHelperBuffer, sizeof(writeHelperBuffer), "%d",
-                     helperDecriptors[i][1]);
-            setenv(helperWriteEnv, writeHelperBuffer, 1);
+            char readDesc[5];
+            snprintf(readDesc, sizeof(readDesc), "%d", channels[i][0]);
+            setenv(CHANNEL_READ_ENV, readDesc, 1);
 
             // TODO: Close not used in process descriptors
 
-            // Przekazujemy dekstyptory do czytania i pisania do programu
-            int descriptor_count = 0;
-            for (int j = 0; j < n; j++) {
-                if (i != j && descriptor_count < n) {
-                    char write_descriptor[32];
-                    snprintf(write_descriptor, sizeof(write_descriptor),
-                             "MIMPI_CHANNEL_WRITE_%d", j);
-                    char read_descriptor[32];
-                    snprintf(read_descriptor, sizeof(read_descriptor),
-                             "MIMPI_CHANNEL_READ_%d", j);
-
-                    char write_desc[8], read_desc[8];
-                    snprintf(write_desc, sizeof(write_desc), "%d",
-                             channels[i][j][1]);
-                    snprintf(read_desc, sizeof(read_desc), "%d",
-                             channels[j][i][0]);
-
-                    setenv(write_descriptor, write_desc, 1);
-                    setenv(read_descriptor, read_desc, 1);
-                    descriptor_count++;
-                }
+            for (int i = 0; i < n; i++) {
+                char writeDescEnv[32];
+                snprintf(writeDescEnv, sizeof(writeDescEnv), "MIMPI_CHANNEL_WRITE_%d", i);
+                // TODO: Make the buffer smaller
+                char writeDesc[8];
+                snprintf(writeDesc, sizeof(writeDesc), "%d", channels[i][1]);
+                setenv(writeDescEnv, writeDesc, 1);
             }
+
             ASSERT_SYS_OK(execvp(prog, args));
         }
     }
@@ -146,17 +111,8 @@ int main(int argc, char *argv[]) {
 
     // Zamykamy używane deskryptory
     for (int i = 0; i < n; i++) {
-        for (int j = 0; j < n; j++) {
-            if (i != j) {
-                close(channels[i][j][0]);
-                close(channels[i][j][1]);
-            }
-        }
-    }
-
-    for (int i = 0; i < n; i++) {
-        close(helperDecriptors[i][0]);
-        close(helperDecriptors[i][1]);
+        close(channels[i][0]);
+        close(channels[i][1]);
     }
 
     // TODO: ZAKONCZ DZIALANIE I ZWOLNIJ EWENTUALNIE UZYWANA PAMIEC

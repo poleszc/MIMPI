@@ -12,11 +12,19 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-typedef struct sendData {
+#define CHUNK_SIZE 256
+
+typedef struct initialDataChunk {
+    int source;
     int count;
     int tag;
     void *data;
-} sendData;
+} initialDataChunk;
+
+typedef struct dataChunk {
+    int source;
+    void *data;
+} dataChunk;
 
 /// DOUBLY LINKED LIST IMPLEMENTATION ///
 // Struktura węzła listy
@@ -42,7 +50,7 @@ LinkedList *createLinkedList() {
 }
 
 // Funkcja dodająca węzeł na koniec listy
-void append(LinkedList *list, sendData *data) {
+void append(LinkedList *list, initialDataChunk *data) {
     Node *newNode = (Node *)malloc(sizeof(Node));
     ASSERT_NOT_NULL(newNode);
     newNode->data = data;
@@ -97,7 +105,7 @@ void deleteNode(LinkedList *list, Node *nodeToDelete) {
 }
 
 // Funkcja dodająca węzeł po wskazanym węźle
-void insertAfterNode(LinkedList *list, Node *prevNode, sendData *data) {
+void insertAfterNode(LinkedList *list, Node *prevNode, initialDataChunk *data) {
     if (prevNode == NULL) {
         printf("Previous node cannot be NULL\n");
         return;
@@ -143,45 +151,41 @@ void deleteLinkedList(LinkedList *list) {
     free(list);
 }
 
-
 /// DOUBLY LINKED LIST IMPLEMENTATION END ///
 
 ///////// MY GLOBALS /////////
 // Oznacza, ze proces główny nie czeka na odebranie wiadomosci.
 // Nie można go używać żeby wysyłać pomocnicze wiadomości do procesów.
 #define NOWAIT_TAG -1
+#define WORLD_SIZE_ENV "MIMPI_WORLD_SIZE"
+#define WORLD_RANK_ENV "MIMPI_WORLD_RANK"
+#define CHANNEL_READ_ENV "MIMPI_CHANNEL_READ"
 
 bool DEADLOCK_DETECTION;
 int WORLD_SIZE;
 int WORLD_RANK;
-
-// Pod i jest numer deskryptora do czytania wiadomości od i-tego procesu
+// Did i-th program end.
+bool PROGRAMS_ENDED[MAX_PROCESSES];
+// FD for writing to i-th program.
 int SEND_FDS[MAX_PROCESSES];
-// Pod i jest numer deskryptora do pisania do i-tego procesu
-int RECV_FDS[MAX_PROCESSES];
-// Deskryptor do czytania wiadomości o zakonczeniu programu od samego siebie
-int ENDING_CHANNEL_READ;
-int ENDING_CHANNEL_WRITE;
+// FD for reading messages to ME.
+int READ_FD;
 
-// Czy i-ty program już się zakończył.
-bool PROGRAMS_ENDED[MAX_PROCESSES]; // TODO: thats not needed
+// Messages being recieved from channel + their size/tag
+initialDataChunk *MESSAGES_IN_BUILD[MAX_PROCESSES];
+int BUILT_MESSAGES_SIZE_COUNT[MAX_PROCESSES][2];
+
 bool remoteMainWaitedForEnded = false;
 
 // Helper thread data
-LinkedList *messageBuffer[MAX_PROCESSES]; // Wiadomości od i-tego procesu
-// pthread_mutex_t bufferMutex;              // Chroni bufor
-pthread_mutex_t bufferMutex[MAX_PROCESSES];
+pthread_t helperThread;
 
+// Buffer for messages from i-th program.
+LinkedList *messageBuffer[MAX_PROCESSES];
 sem_t mainThreadStopper; // Zatrzymuje watek glowny jak nie ma wiadomosci
-// pthread_t helperThread;
-
-// Tablica wątków pomocniczych buforujacych dane
-pthread_t helperThreads[MAX_PROCESSES];
+pthread_mutex_t bufferMutex;
 
 bool helperThreadActive = true;
-
-// int maxFd = 0; // Maksymalna wartość deskryptora(do selecta)
-
 // Na jaką wiadomość obecnie czeka wątek główny na mutexie.
 int tagIWaitFor = NOWAIT_TAG;
 int countIWaitFor = NOWAIT_TAG;
@@ -189,8 +193,9 @@ int sourceIWaitFor = NOWAIT_TAG;
 bool recieved = true;
 // Jeżeli helper odczytał dane, na które akurat czeka recv to nie wrzuca ich bez
 // sensu do listy żeby uniknać podwójnego szukania
-sendData *justRecieved = NULL;
+initialDataChunk *justRecieved = NULL;
 ///////// MY GLOBALS END /////////
+
 void printBuffer(LinkedList *messageBuffer[MAX_PROCESSES]) {
     fprintf(stderr, "======================BUFFER======================\n");
     for (int i = 0; i < WORLD_SIZE; i++) {
@@ -200,13 +205,12 @@ void printBuffer(LinkedList *messageBuffer[MAX_PROCESSES]) {
     fprintf(stderr, "==================================================\n");
 }
 
-sendData *searchAndRemoveMessage(LinkedList *list, int tag, int count) {
+initialDataChunk *searchAndRemoveMessage(LinkedList *list, int tag, int count) {
     fprintf(stderr, "Buffer in search\n");
     displayList(list);
     Node *curr = list->head;
 
-    while (curr != list->tail &&
-           (tag == MIMPI_ANY_TAG && curr->data->count != count) &&
+    while (curr != list->tail && (tag == MIMPI_ANY_TAG && curr->data->count != count) &&
            (curr->data->tag != tag || curr->data->count != count)) {
         curr = curr->next;
     }
@@ -220,49 +224,27 @@ sendData *searchAndRemoveMessage(LinkedList *list, int tag, int count) {
     return data;
 }
 
-
 // Arg t o indeks w tablicy wątków danego wątku.
-void *helperThreadMain(void *arg) {
-    fd_set readDescriptorsSet;
-    int *temp = (int *)arg;
-    int myIndex = *temp;
-    free(temp);
-
-    fprintf(stderr, "HELPER %d NUMBER %d:  Entered main\n", WORLD_RANK,
-            myIndex);
-    fprintf(stderr,
-            "HELPER OF %d NUMBER %d:  I'll read messages from %d process and "
-            "main\n",
-            WORLD_RANK, myIndex, myIndex);
-
-    int maxFd = ENDING_CHANNEL_READ > RECV_FDS[myIndex] ? ENDING_CHANNEL_READ
-                                                        : RECV_FDS[myIndex];
+void *helperThreadMain() {
+    fprintf(stderr, "HELPER %d:  Entered main\n", WORLD_RANK);
+    fprintf(stderr, "HELPER OF %d:  I'll read messages from %d process and main\n", WORLD_RANK);
 
     while (helperThreadActive) {
-        fprintf(stderr, "HELPER %d NUMBER %d: Clearing desc set\n", WORLD_RANK,
-                myIndex);
-        // FD_SET is modified during select, so we have to reset it in every
-        // iteration.
-        FD_ZERO(&readDescriptorsSet);
-        FD_SET(ENDING_CHANNEL_READ, &readDescriptorsSet);
-        FD_SET(RECV_FDS[myIndex], &readDescriptorsSet);
-        fprintf(stderr, "HELPER %d NUMBER %d: Added descriptors: %d, %d\n",
-                WORLD_RANK, myIndex, ENDING_CHANNEL_READ, RECV_FDS[myIndex]);
+        // TODO: Totally change helper main code
 
-        fprintf(stderr, "HELPER %d NUMBER %d: Select with maxFd %d\n",
-                WORLD_RANK, myIndex, maxFd);
-        int ready = select(maxFd + 1, &readDescriptorsSet, NULL, NULL, NULL);
-        ASSERT_SYS_OK(ready);
-        fprintf(
-            stderr,
-            "HELPER %d NUMBER %d: Woke up form select, this many wait: %d\n",
-            WORLD_RANK, myIndex, ready);
-        fprintf(stderr, "HELPER %d NUMBER %d: Recieving through: %d\n",
-                WORLD_RANK, myIndex, RECV_FDS[myIndex]);
+        recievedData->data = malloc(recievedData->count);
+        ASSERT_NOT_NULL(recievedData->data);
+
+        totalRead = 0;
+        totalToBeRead = recievedData->count;
+        while (totalRead < totalToBeRead) {
+            ssize_t read = chrecv(RECV_FDS[myIndex], recievedData->data + totalRead, totalToBeRead);
+            ASSERT_SYS_OK(read);
+            totalRead += read;
+        }
 
         if (FD_ISSET(RECV_FDS[myIndex], &readDescriptorsSet)) {
-            fprintf(stderr, "HELPER %d NUMBER %d: Got message from %d\n",
-                    WORLD_RANK, myIndex, myIndex);
+            fprintf(stderr, "HELPER %d: Got message from %d\n", WORLD_RANK, myIndex, myIndex);
 
             // Wczytujemy tylko rozmiar danych, zeby wiedziec ile
             // pamięci zaalokować. Ten while tutaj to troche z armaty do
@@ -275,8 +257,7 @@ void *helperThreadMain(void *arg) {
             int totalRead = 0;
             int totalToBeRead = sizeof(recv_data);
             while (totalRead < totalToBeRead) {
-                ssize_t read = chrecv(RECV_FDS[myIndex], recv_data + totalRead,
-                                      totalToBeRead);
+                ssize_t read = chrecv(RECV_FDS[myIndex], recv_data + totalRead, totalToBeRead);
                 ASSERT_SYS_OK(read);
                 totalRead += read;
             }
@@ -285,7 +266,7 @@ void *helperThreadMain(void *arg) {
 
             if (recievedData->tag == -1) { // Proces myIndex, się skończył
                 fprintf(stderr,
-                        "HELPER %d NUMBER %d: Got ending message from the "
+                        "HELPER %d: Got ending message from the "
                         "process I wait for %d\n",
                         WORLD_RANK, myIndex, myIndex);
                 PROGRAMS_ENDED[myIndex] = true;
@@ -297,9 +278,7 @@ void *helperThreadMain(void *arg) {
                 // TODO: Chyba trzeba tu dodać sprawdzenie, ze pipe od niego
                 // jest na pewno pusty
                 if (sourceIWaitFor == myIndex) {
-                    fprintf(stderr,
-                            "HELPER %d: Main waited for message from %d\n",
-                            WORLD_RANK, myIndex);
+                    fprintf(stderr, "HELPER %d: Main waited for message from %d\n", WORLD_RANK, myIndex);
                     remoteMainWaitedForEnded = true;
                     ASSERT_SYS_OK(sem_post(&mainThreadStopper));
                 }
@@ -310,15 +289,12 @@ void *helperThreadMain(void *arg) {
                 totalRead = 0;
                 totalToBeRead = recievedData->count;
                 while (totalRead < totalToBeRead) {
-                    ssize_t read =
-                        chrecv(RECV_FDS[myIndex],
-                               recievedData->data + totalRead, totalToBeRead);
+                    ssize_t read = chrecv(RECV_FDS[myIndex], recievedData->data + totalRead, totalToBeRead);
                     ASSERT_SYS_OK(read);
                     totalRead += read;
                 }
 
-                fprintf(stderr, "HELPER %d NUMEBER %d: Read all the data\n",
-                        WORLD_RANK, myIndex);
+                fprintf(stderr, "HELPER %d NUMEBER %d: Read all the data\n", WORLD_RANK, myIndex);
 
                 // Tutaj recievedData powinno być już wypełnione. Można je
                 // dodać do naszego bufora
@@ -326,11 +302,8 @@ void *helperThreadMain(void *arg) {
                 // Sprawdzamy czy ktoś czeka na to co własnie wczytaliśmy
                 // Mogly byc dwie takie same po sobie, wiec sprawdzamy czy
                 // odebrał
-                if (recieved && countIWaitFor == recievedData->count &&
-                    sourceIWaitFor == myIndex &&
-                    (tagIWaitFor == recievedData->tag ||
-                     (tagIWaitFor == MIMPI_ANY_TAG &&
-                      recievedData->tag >= 0))) {
+                if (recieved && countIWaitFor == recievedData->count && sourceIWaitFor == myIndex &&
+                    (tagIWaitFor == recievedData->tag || (tagIWaitFor == MIMPI_ANY_TAG && recievedData->tag >= 0))) {
                     fprintf(stderr,
                             "HELPER %d NUMEBER %d: Someone was waiting for "
                             "that exact "
@@ -340,11 +313,10 @@ void *helperThreadMain(void *arg) {
                     justRecieved = recievedData;
                     ASSERT_SYS_OK(sem_post(&mainThreadStopper));
                 } else {
-                    fprintf(
-                        stderr,
-                        "HELPER %d NUMEBER %d: No one is waiting, appending to "
-                        "buffer\n",
-                        WORLD_RANK, myIndex);
+                    fprintf(stderr,
+                            "HELPER %d NUMEBER %d: No one is waiting, appending to "
+                            "buffer\n",
+                            WORLD_RANK, myIndex);
                     ASSERT_ZERO(pthread_mutex_lock(&bufferMutex[myIndex]));
                     append(messageBuffer[myIndex], recievedData);
                     printBuffer(messageBuffer);
@@ -357,14 +329,11 @@ void *helperThreadMain(void *arg) {
         else if (FD_ISSET(ENDING_CHANNEL_READ, &readDescriptorsSet)) {
             // else {
             //  Dostałem wiadomość od swojego maina, czyli musze się zakończyć.
-            fprintf(stderr,
-                    "HELPER %d NUMBER %d: Recieved ending message from my "
-                    "main, breaking\n",
-                    WORLD_RANK, myIndex);
+            fprintf(stderr, "HELPER %d: Recieved ending message from my main, breaking\n", WORLD_RANK, myIndex);
             break;
         }
     }
-    fprintf(stderr, "HELPER %d NUMBER %d: I Die :(\n", WORLD_RANK, myIndex);
+    fprintf(stderr, "HELPER %d: I Die :(\n", WORLD_RANK, myIndex);
     return NULL;
 }
 
@@ -379,90 +348,49 @@ void MIMPI_Init(bool enable_deadlock_detection) {
 
     // Inicjalizujemy World Size i World Rank i deskryptory do komunikacji z
     // pomocnikiem
-    // TODO: Usun te mallocki, repeated literal
-    const char *world_size_env = getenv("MIMPI_WORLD_SIZE");
-    const char *world_rank_env = getenv("MIMPI_WORLD_RANK");
-    const char *helperReadDesc = getenv("MIMPI_HELPER_READ");
-    const char *helperWriteDesc = getenv("MIMPI_HELPER_WRITE");
+    const char *world_size_env = getenv(WORLD_SIZE_ENV);
+    const char *world_rank_env = getenv(WORLD_RANK_ENV));
+    const char *read_fd_env = getenv(CHANNEL_READ_ENV);
     ASSERT_NOT_NULL(world_size_env);
     ASSERT_NOT_NULL(world_rank_env);
-    ASSERT_NOT_NULL(helperReadDesc);
-    ASSERT_NOT_NULL(helperWriteDesc);
+    ASSERT_NOT_NULL(read_fd_env);
 
     WORLD_SIZE = atoi(world_size_env);
     WORLD_RANK = atoi(world_rank_env);
-    ENDING_CHANNEL_READ = atoi(helperReadDesc);
-    ENDING_CHANNEL_WRITE = atoi(helperWriteDesc);
+    READ_FD = atoi(read_fd_env);
 
-    ASSERT_ZERO(unsetenv("MIMPI_WORLD_SIZE"));
-    ASSERT_ZERO(unsetenv("MIMPI_WORLD_RANK"));
-    ASSERT_ZERO(unsetenv("MIMPI_HELPER_READ"));
-    ASSERT_ZERO(unsetenv("MIMPI_HELPER_WRITE"));
+    ASSERT_ZERO(unsetenv(WORLD_SIZE_ENV));
+    ASSERT_ZERO(unsetenv(WORLD_RANK_ENV));
+    ASSERT_ZERO(unsetenv(CHANNEL_READ_ENV));
+
+    fprintf(stderr, "MAIN %d: Entered Init\n", WORLD_RANK);
 
     // Inicjalizujemy tablice deskryptorów do komunikacji send/recv z
     // programami.
     for (int i = 0; i < WORLD_SIZE; i++) {
-        if (i != WORLD_RANK) {
-            char write_descriptor[32];
-            snprintf(write_descriptor, sizeof(write_descriptor),
-                     "MIMPI_CHANNEL_WRITE_%d", i);
-            char read_descriptor[32];
-            snprintf(read_descriptor, sizeof(read_descriptor),
-                     "MIMPI_CHANNEL_READ_%d", i);
+        char writeDescEnv[32];
+        snprintf(writeDescEnv, sizeof(writeDescEnv), "MIMPI_CHANNEL_WRITE_%d", i);
 
-            char *temp1 = getenv(write_descriptor);
-            char *temp2 = getenv(read_descriptor);
+        const char *readFd = getenv(writeDescEnv);
+        ASSERT_NOT_NULL(readFd);
 
-            if (temp1 && temp2) {
-                SEND_FDS[i] = atoi(temp1);
-                RECV_FDS[i] = atoi(temp2);
-            }
-
-            ASSERT_ZERO(unsetenv(write_descriptor));
-            ASSERT_ZERO(unsetenv(read_descriptor));
-        }
+        SEND_FDS[i] = atoi(readFd);
+        unsetenv(writeDescEnv);
     }
-    // // Inicjalizujemy tablice deskryptorów do komunikacji kończącej
-    // // programy.
-    // for (int i = 0; i < WORLD_SIZE; i++) {
-    //     char writeToHelperEnv[32];
-    //     snprintf(writeToHelperEnv, sizeof(writeToHelperEnv),
-    //              "MIMPI_HELPER_WRITE_%d", i);
 
-    //     char *temp1 = getenv(writeToHelperEnv);
-
-    //     if (temp1) {
-    //         PROGRAM_ENDING_FDS[i] = atoi(temp1);
-    //     }
-    //     ASSERT_ZERO(unsetenv(writeToHelperEnv));
-    // }
-
-    // Inicjalizujemy bufor na senda.
+    // Initializing global arrays and buffer.
     for (int i = 0; i < WORLD_SIZE; i++) {
         messageBuffer[i] = createLinkedList();
+        PROGRAMS_ENDED[i] = false;
+        MESSAGES_IN_BUILD[i] = NULL;
+        BUILT_MESSAGES_SIZE_COUNT[i][0] = -1;
+        BUILT_MESSAGES_SIZE_COUNT[i][1] = -1;
     }
 
-    // Tworzymy wątek pomocniczy i semafor je synchronizujacy. Poczatkowo
-    // ustawiony na zero
-    for (int i = 0; i < WORLD_SIZE; i++) {
-        ASSERT_ZERO(pthread_mutex_init(&bufferMutex[i], NULL));
-    }
-
+    fprintf(stderr, "MAIN %d: Finished initializincg, startuing helper\n", WORLD_RANK);
+    ASSERT_ZERO(pthread_mutex_init(&bufferMutex, NULL));
     ASSERT_SYS_OK(sem_init(&mainThreadStopper, 0, 0));
-
-    // Tworzymy WORLD_SIZE wątków pomocniczych, każdy buforuje widomości od
-    // jednego procesu
-
-    for (int i = 0; i < WORLD_SIZE; i++) {
-        if (i != WORLD_RANK) {
-            fprintf(stderr, "MAIN %d: Im in init, Starting helper %d\n",
-                    WORLD_RANK, i);
-            int *index = (int *)malloc(sizeof(int));
-            *index = i;
-            ASSERT_ZERO(pthread_create(&helperThreads[i], NULL,
-                                       helperThreadMain, (void *)index));
-        }
-    }
+    ASSERT_ZERO(pthread_create(&helperThread, NULL, helperThreadMain, NULL));
 }
 
 void MIMPI_Finalize() {
@@ -470,45 +398,29 @@ void MIMPI_Finalize() {
     // wiadomość od nas, ze wychodzimy z bloku. Chyba właśnie nie wysyłamy,
     // tylko czekamy az read zwróci zero
 
-    // Wysyłamy wiadomości do wszystkich innych procesów, że się skończyliśmy
     fprintf(stderr, "MAIN %d: Entered finalize\n", WORLD_RANK);
-    // bool endingMessage = true;
-    for (int i = 0; i < WORLD_SIZE; i++) {
-        if (i != WORLD_RANK) {
-            fprintf(stderr, "MAIN %d: Sending ending message to %d\n",
-                    WORLD_RANK, i);
-            int mockMess[2];
-            mockMess[0] = 0;
-            mockMess[1] = -1;
-            ssize_t wrote = chsend(SEND_FDS[i], mockMess, sizeof(mockMess));
-            ASSERT_SYS_OK(wrote);
-            fprintf(stderr, "MAIN %d: Sucessfully sent ending message to %d\n",
-                    WORLD_RANK, i);
-        }
-    }
 
-    fprintf(stderr, "MAIN %d: Sending ending message to helpers\n", WORLD_RANK);
-    // Ubijamy naszych pomocnikow.
-    // helperThreadActive = false;
-    bool helperEnderMessage = true;
-    // TODO: Usun te tablice PROGRAM_ENDING_FDS
-    ssize_t wrote =
-        chsend(ENDING_CHANNEL_WRITE, &helperEnderMessage, sizeof(bool));
-    ASSERT_SYS_OK(wrote);
+    // bool endMess = false;
+    // for (int i = 0; i < WORLD_SIZE; i++)
+    // {
+    //     if (i != WORLD_RANK) {
+    //         fprintf(stderr, "MAIN %d: Sending end message to %d\n",
+    //         WORLD_RANK, i);
 
-    for (int i = 0; i < WORLD_SIZE; i++) {
-        if (i != WORLD_RANK) {
-            ASSERT_ZERO(pthread_join(helperThreads[i], NULL));
-            fprintf(stderr, "MAIN %d: Helper Thread %d ended\n", WORLD_RANK, i);
-        }
-    }
-    fprintf(stderr, "MAIN %d: All helpers ended\n", WORLD_RANK);
+    //         int res = MIMPI_Send(&endMess, sizeof(endMess), i, -1);
+    //         if (res != MIMPI_SUCCESS) {
+    //             fprintf(stderr, "MAIN %d: MIMPI_SEND FAILED\n", WORLD_RANK);
+    //         }
+    //     }
+    // }
+    // int res = MIMPI_Send(&endMess, sizeof(endMess), WORLD_RANK, -1);
+    // if (res != MIMPI_SUCCESS) {
+    //     fprintf(stderr, "MAIN %d: MIMPI_SEND FAILED\n", WORLD_RANK);
+    // }
 
+    ASSERT_ZERO(pthread_join(helperThread, NULL));
     ASSERT_SYS_OK(sem_destroy(&mainThreadStopper));
-    for (int i = 0; i < WORLD_SIZE; i++) {
-        ASSERT_ZERO(pthread_mutex_destroy(&bufferMutex[i]));
-    }
-    
+    ASSERT_ZERO(pthread_mutex_destroy(&bufferMutex));
 
     // Niszczymy bufor na senda.
     for (int i = 0; i < WORLD_SIZE; i++) {
@@ -525,8 +437,7 @@ int MIMPI_World_size() { return WORLD_SIZE; }
 
 int MIMPI_World_rank() { return WORLD_RANK; }
 
-MIMPI_Retcode MIMPI_Send(void const *data, int count, int destination,
-                         int tag) {
+MIMPI_Retcode MIMPI_Send(void const *data, int count, int destination, int tag) {
 
     // Jezeli wchodzimy tu i chcemy wysłać wiadomość do procesu do
     // destination ktory juz nie istnieje bo wyszedl z bloku MPI to zwracamy
@@ -536,6 +447,7 @@ MIMPI_Retcode MIMPI_Send(void const *data, int count, int destination,
     // TODO: Sprawdzenie czy program do ktorego wysyłamy wyszedł z bloku
     // MIMPI
     fprintf(stderr, "MAIN %d: Entering MIMPI_Send\n", WORLD_RANK);
+
     if (destination < 0 || destination > WORLD_SIZE - 1) {
         return MIMPI_ERROR_NO_SUCH_RANK;
     } else if (destination == WORLD_RANK) {
@@ -544,28 +456,43 @@ MIMPI_Retcode MIMPI_Send(void const *data, int count, int destination,
         return MIMPI_ERROR_REMOTE_FINISHED;
     } else {
         fprintf(stderr,
-                "MAIN %d: Everything okey with the message, sending: %d, %d "
-                "through %d\n",
-                WORLD_RANK, destination, tag, SEND_FDS[destination]);
+                "MAIN %d: Initializing send to %d with count %d and tag %d, "
+                "through %d",
+                WORLD_RANK, destination, count, tag, SEND_FDS[destination]);
 
-        int send_data[2] = {count, tag};
-        int totalToBeSent = sizeof(send_data);
-        int totalSent = 0;
-        while (totalSent < totalToBeSent) {
-            ssize_t wrote = chsend(SEND_FDS[destination], send_data + totalSent,
-                                   totalToBeSent);
-            ASSERT_SYS_OK(wrote);
-            totalSent += wrote;
-        }
+        // Pierwszy chunk z danymi i countem, kolejne będą miały tylko source
+        int sentByNow = 0;
 
-        totalToBeSent = count;
-        totalSent = 0;
-        while (totalSent < totalToBeSent) {
-            ssize_t wrote =
-                chsend(SEND_FDS[destination], data + totalSent, totalToBeSent);
+        initialDataChunk dataToSend;
+        dataToSend.source = WORLD_RANK;
+        dataToSend.count = count;
+        dataToSend.tag = tag;
+        dataToSend.data = (void *)malloc(CHUNK_SIZE - 3 * sizeof(int));
+        memcpy(dataToSend.data, data, CHUNK_SIZE - 3 * sizeof(int));
+
+        // TODO: Moze trzeba tu dodać while'a.
+        ssize_t wrote = chsend(SEND_FDS[destination], &dataToSend, CHUNK_SIZE);
+        ASSERT_SYS_OK(wrote);
+        assert(wrote == 256);
+        free(dataToSend.data);
+
+        sentByNow += (CHUNK_SIZE - 3 * sizeof(int));
+
+        fprintf(stderr, "MAIN %d: Sent initial chunk\n", WORLD_RANK);
+
+        dataChunk chunk;
+        chunk.source = WORLD_RANK;
+        chunk.data = (void *)malloc(CHUNK_SIZE - sizeof(int));
+        while (sentByNow < count) {
+            fprintf(stderr, "MAIN %d: Chunk send\n", WORLD_RANK);
+            memcpy(chunk.data, data + sentByNow, CHUNK_SIZE - sizeof(int));
+            ssize_t wrote = chsend(SEND_FDS[destination], &chunk, CHUNK_SIZE);
             ASSERT_SYS_OK(wrote);
-            totalSent += wrote;
+            assert(wrote == 256);
+            sentByNow += (CHUNK_SIZE - sizeof(int));
         }
+        free(chunk.data);
+
         fprintf(stderr, "MAIN %d: Sent all data\n", WORLD_RANK);
         return MIMPI_SUCCESS;
     }
@@ -597,18 +524,14 @@ MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
     // else if (wysylajacy się skończyl i nie wysłał pasujacej wiadomosci)
     // {}
     else {
-        fprintf(stderr,
-                "MAIN %d: Everything okay with the message, recieving\n",
-                WORLD_RANK);
+        fprintf(stderr, "MAIN %d: Everything okay with the message, recieving\n", WORLD_RANK);
 
-        ASSERT_ZERO(pthread_mutex_lock(&bufferMutex[source]));
-        sendData *found =
-            searchAndRemoveMessage(messageBuffer[source], tag, count);
-        ASSERT_ZERO(pthread_mutex_unlock(&bufferMutex[source]));
+        ASSERT_ZERO(pthread_mutex_lock(&bufferMutex));
+        initialDataChunk *found = searchAndRemoveMessage(messageBuffer[source], tag, count);
+        ASSERT_ZERO(pthread_mutex_unlock(&bufferMutex));
 
         if (!found) { // Jeszcze nie ma wiadomości dla nas, czekamy.
-            fprintf(stderr, "MAIN %d: No message was found, I hang myself\n",
-                    WORLD_RANK);
+            fprintf(stderr, "MAIN %d: No message was found, I hang myself\n", WORLD_RANK);
             recieved = true;
             tagIWaitFor = tag;
             countIWaitFor = count;
@@ -635,8 +558,7 @@ MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
         }
         // Tutaj found ustawione na dobrą wiadomość, która odbieramy.
 
-        fprintf(stderr, "MAIN %d: Actually copying memory to target ptr\n",
-                WORLD_RANK);
+        fprintf(stderr, "MAIN %d: Actually copying memory to target ptr\n", WORLD_RANK);
         memcpy(data, found->data, found->count);
 
         free(found);
@@ -652,7 +574,6 @@ MIMPI_Retcode MIMPI_Bcast(void *data, int count, int root){
     // pozostałych procesow
 }
 
-MIMPI_Retcode MIMPI_Reduce(void const *send_data, void *recv_data, int count,
-                           MIMPI_Op op, int root) {
+MIMPI_Retcode MIMPI_Reduce(void const *send_data, void *recv_data, int count, MIMPI_Op op, int root) {
     TODO
 }
