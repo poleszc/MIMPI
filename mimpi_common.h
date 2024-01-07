@@ -13,52 +13,48 @@
 #define MAX_PROCESSES 16
 
 /*
-    Assert that expression doesn't evaluate to -1 (as almost every system function does in case of error).
+    Assert that expression doesn't evaluate to -1 (as almost every system
+   function does in case of error).
 
     Use as a function, with a semicolon, like: ASSERT_SYS_OK(close(fd));
-    (This is implemented with a 'do { ... } while(0)' block so that it can be used between if () and else.)
+    (This is implemented with a 'do { ... } while(0)' block so that it can be
+   used between if () and else.)
 */
-#define ASSERT_SYS_OK(expr)                                                                \
-    do {                                                                                   \
-        if ((expr) == -1)                                                                  \
-            syserr(                                                                        \
-                "system command failed: %s\n\tIn function %s() in %s line %d.\n\tErrno: ", \
-                #expr, __func__, __FILE__, __LINE__                                        \
-            );                                                                             \
-    } while(0)
+#define ASSERT_SYS_OK(expr)                                                    \
+    do {                                                                       \
+        if ((expr) == -1)                                                      \
+            syserr("system command failed: %s\n\tIn function %s() in %s line " \
+                   "%d.\n\tErrno: ",                                           \
+                   #expr, __func__, __FILE__, __LINE__);                       \
+    } while (0)
 
-/* Assert that expression evaluates to zero (otherwise use result as error number, as in pthreads). */
-#define ASSERT_ZERO(expr)                                                                  \
-    do {                                                                                   \
-        int const _errno = (expr);                                                         \
-        if (_errno != 0)                                                                   \
-            syserr(                                                                        \
-                "Failed: %s\n\tIn function %s() in %s line %d.\n\tErrno: ",                \
-                #expr, __func__, __FILE__, __LINE__                                        \
-            );                                                                             \
-    } while(0)
+/* Assert that expression evaluates to zero (otherwise use result as error
+ * number, as in pthreads). */
+#define ASSERT_ZERO(expr)                                                      \
+    do {                                                                       \
+        int const _errno = (expr);                                             \
+        if (_errno != 0)                                                       \
+            syserr("Failed: %s\n\tIn function %s() in %s line %d.\n\tErrno: ", \
+                   #expr, __func__, __FILE__, __LINE__);                       \
+    } while (0)
 
 /* Prints with information about system error (errno) and quits. */
-_Noreturn extern void syserr(const char* fmt, ...);
+_Noreturn extern void syserr(const char *fmt, ...);
 
 /* Prints (like printf) and quits. */
-_Noreturn extern void fatal(const char* fmt, ...);
+_Noreturn extern void fatal(const char *fmt, ...);
 
 #define TODO fatal("UNIMPLEMENTED function %s", __PRETTY_FUNCTION__);
 
-
 /////////////////////////////////////////////
 
-#define ASSERT_NOT_NULL(expr)                                                                \
-    do {                                                                                   \
-        if ((expr) == NULL)                                                                  \
-            syserr(                                                                        \
-                "malloc failed: %s\n\tIn function %s() in %s line %d.\n\tErrno: ", \
-                #expr, __func__, __FILE__, __LINE__                                        \
-            );                                                                             \
-    } while(0)
-
-
+#define ASSERT_NOT_NULL(expr)                                                  \
+    do {                                                                       \
+        if ((expr) == NULL)                                                    \
+            syserr("malloc failed: %s\n\tIn function %s() in %s line "         \
+                   "%d.\n\tErrno: ",                                           \
+                   #expr, __func__, __FILE__, __LINE__);                       \
+    } while (0)
 
 
 #endif // MIMPI_COMMON_H
