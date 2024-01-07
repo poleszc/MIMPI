@@ -331,7 +331,7 @@ void *helperThreadMain() {
                 if (recieved && countIWaitFor == recievedData->count &&
                     sourceIWaitFor == i &&
                     (tagIWaitFor == recievedData->tag ||
-                     tagIWaitFor == MIMPI_ANY_TAG)) {
+                     (tagIWaitFor == MIMPI_ANY_TAG && recievedData->tag >= 0))) {
                     fprintf(stderr,
                             "HELPER %d: Someone was waiting for that exact "
                             "message\n",
