@@ -29,7 +29,7 @@ typedef struct dataChunk {
 /// DOUBLY LINKED LIST IMPLEMENTATION ///
 // Struktura węzła listy
 typedef struct Node {
-    sendData *data;
+    initialDataChunk *data;
     struct Node *next;
     struct Node *prev;
 } Node;
@@ -64,26 +64,6 @@ void append(LinkedList *list, initialDataChunk *data) {
         newNode->prev = list->tail;
     }
     list->tail = newNode;
-}
-
-// Funkcja usuwająca węzeł na podstawie wskazanego węzła. Zwalnia pamięc na
-// data.
-// TODO: ta funkcja moze byc calkiem niepotrzebna?
-void deleteNodeFreeData(LinkedList *list, Node *nodeToDelete) {
-    if (nodeToDelete->prev != NULL) {
-        nodeToDelete->prev->next = nodeToDelete->next;
-    } else {
-        list->head = nodeToDelete->next;
-    }
-
-    if (nodeToDelete->next != NULL) {
-        nodeToDelete->next->prev = nodeToDelete->prev;
-    } else {
-        list->tail = nodeToDelete->prev;
-    }
-
-    free(nodeToDelete->data);
-    free(nodeToDelete);
 }
 
 // Funkcja usuwająca węzeł na podstawie wskazanego węzła. Zwalnia pamięc na
@@ -219,7 +199,7 @@ initialDataChunk *searchAndRemoveMessage(LinkedList *list, int tag, int count) {
         return NULL;
     }
 
-    sendData *data = curr->data;
+    initialDataChunk *data = curr->data;
     deleteNode(list, curr);
     return data;
 }
@@ -488,6 +468,7 @@ MIMPI_Retcode MIMPI_Send(void const *data, int count, int destination, int tag) 
             memcpy(chunk.data, data + sentByNow, CHUNK_SIZE - sizeof(int));
             ssize_t wrote = chsend(SEND_FDS[destination], &chunk, CHUNK_SIZE);
             ASSERT_SYS_OK(wrote);
+            //TODO : moze tu while
             assert(wrote == 256);
             sentByNow += (CHUNK_SIZE - sizeof(int));
         }
@@ -532,6 +513,13 @@ MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
 
         if (!found) { // Jeszcze nie ma wiadomości dla nas, czekamy.
             fprintf(stderr, "MAIN %d: No message was found, I hang myself\n", WORLD_RANK);
+
+            // Source skończył się i nie wysłał wiadomości już przed naszym czekaniem
+            if (PROGRAMS_ENDED[source]) {
+                fprintf(stderr, "MAIN %d: Remote ended\n", WORLD_RANK);
+                return MIMPI_ERROR_REMOTE_FINISHED;
+            }
+            
             recieved = true;
             tagIWaitFor = tag;
             countIWaitFor = count;
@@ -543,8 +531,9 @@ MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
             tagIWaitFor = NOWAIT_TAG;
             countIWaitFor = NOWAIT_TAG;
 
-            // Zostaliśmy obudzeni bo helper dostał info o zakończeniu
+            // Source zakończył się w trakcie naszego czekania na niego.
             if (remoteMainWaitedForEnded && recieved) {
+                fprintf(stderr, "MAIN %d: Remote ended during our wating\n", WORLD_RANK);
                 return MIMPI_ERROR_REMOTE_FINISHED;
             }
             recieved = true;
