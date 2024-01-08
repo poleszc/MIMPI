@@ -150,21 +150,18 @@ bool PROGRAMS_ENDED[MAX_PROCESSES];
 int SEND_FDS[MAX_PROCESSES];
 // FD for reading messages to ME.
 int READ_FD;
-
 // Messages being recieved from channel + their size/tag
 initialDataChunk *MESSAGES_IN_BUILD[MAX_PROCESSES];
-int BUILT_MESSAGES_SIZE_COUNT[MAX_PROCESSES][2];
+int BUILT_BY_NOW[MAX_PROCESSES];
 
 bool remoteMainWaitedForEnded = false;
 
 // Helper thread data
 pthread_t helperThread;
-
 // Buffer for messages from i-th program.
 LinkedList *messageBuffer[MAX_PROCESSES];
 sem_t mainThreadStopper; // Zatrzymuje watek glowny jak nie ma wiadomosci
 pthread_mutex_t bufferMutex;
-
 bool helperThreadActive = true;
 // Na jaką wiadomość obecnie czeka wątek główny na mutexie.
 int tagIWaitFor = NOWAIT_TAG;
@@ -176,7 +173,7 @@ bool recieved = true;
 initialDataChunk *justRecieved = NULL;
 ///////// MY GLOBALS END /////////
 
-void printBuffer(LinkedList *messageBuffer[MAX_PROCESSES]) {
+void printBufferDebug(LinkedList *messageBuffer[MAX_PROCESSES]) {
     fprintf(stderr, "======================BUFFER======================\n");
     for (int i = 0; i < WORLD_SIZE; i++) {
         fprintf(stderr, "%d:   ", i);
@@ -206,115 +203,77 @@ initialDataChunk *searchAndRemoveMessage(LinkedList *list, int tag, int count) {
 
 // Arg t o indeks w tablicy wątków danego wątku.
 void *helperThreadMain() {
+
     fprintf(stderr, "HELPER %d:  Entered main\n", WORLD_RANK);
-    fprintf(stderr, "HELPER OF %d:  I'll read messages from %d process and main\n", WORLD_RANK);
-
     while (helperThreadActive) {
-        // TODO: Totally change helper main code
+        void *recieved = (void *)malloc(CHUNK_SIZE);
 
-        recievedData->data = malloc(recievedData->count);
-        ASSERT_NOT_NULL(recievedData->data);
+        ssize_t read = chrecv(READ_FD, recieved, CHUNK_SIZE);
+        ASSERT_SYS_OK(read);
+        assert(read == 256);
 
-        totalRead = 0;
-        totalToBeRead = recievedData->count;
-        while (totalRead < totalToBeRead) {
-            ssize_t read = chrecv(RECV_FDS[myIndex], recievedData->data + totalRead, totalToBeRead);
-            ASSERT_SYS_OK(read);
-            totalRead += read;
-        }
+        int source = *(int *)recieved;
+        fprintf(stderr, "HELPER %d:  Read message from %d\n", WORLD_RANK, source);
 
-        if (FD_ISSET(RECV_FDS[myIndex], &readDescriptorsSet)) {
-            fprintf(stderr, "HELPER %d: Got message from %d\n", WORLD_RANK, myIndex, myIndex);
+        if (MESSAGES_IN_BUILD[source] == NULL) { // wiadomość incjalizujaca blok, wiemy ze jest tam count i
+                                                 // tu alokujemy pamiec
+            fprintf(stderr, "HELPER %d:  That was a first message\n", WORLD_RANK, source);
+            initialDataChunk *data = (initialDataChunk *)recieved;
 
-            // Wczytujemy tylko rozmiar danych, zeby wiedziec ile
-            // pamięci zaalokować. Ten while tutaj to troche z armaty do
-            // wróbla.
-            // TODO: Może usuń while'a.
-            // TODO: Można usunąć recv_data i wpisywac bezposrednio do
-            // recievedData
-            sendData *recievedData = (sendData *)malloc(sizeof(sendData));
-            int recv_data[2];
-            int totalRead = 0;
-            int totalToBeRead = sizeof(recv_data);
-            while (totalRead < totalToBeRead) {
-                ssize_t read = chrecv(RECV_FDS[myIndex], recv_data + totalRead, totalToBeRead);
-                ASSERT_SYS_OK(read);
-                totalRead += read;
+            initialDataChunk *bufferData = (initialDataChunk *)malloc(sizeof(initialDataChunk));
+            bufferData->source = data->source;
+            bufferData->tag = data->count;
+            bufferData->count = data->tag;
+            bufferData->data = (void *)malloc(bufferData->count);
+            memcpy(bufferData->data, data->data, CHUNK_SIZE - 3 * sizeof(int));
+
+            BUILT_BY_NOW[source] = CHUNK_SIZE - 3 * sizeof(int);
+            MESSAGES_IN_BUILD[source] = bufferData;
+        } else { // to juz kolejyny blok z kolei, dolaczamy do istniejacego
+            fprintf(stderr, "HELPER %d:  Thats NOT a first message\n", WORLD_RANK, source);
+            dataChunk *data = (dataChunk *)recieved;
+            initialDataChunk *bufferData = MESSAGES_IN_BUILD[source];
+            memcpy(bufferData->data + BUILT_BY_NOW[source], data->data, CHUNK_SIZE - sizeof(int));
+
+            BUILT_BY_NOW[source] += (CHUNK_SIZE - sizeof(int));
+
+            if (BUILT_BY_NOW[source] >= bufferData->count) { // Message ready
+                if (bufferData->tag == -1) {                 // End request from parent
+                    fprintf(stderr, "HELPER %d:  Got ending message from parent\n", WORLD_RANK);
+                    break;
+                } else if (bufferData->tag == -2) { // Process of id buff->source just ended
+                    fprintf(stderr, "HELPER %d:  Process %d just ended\n", WORLD_RANK, bufferData->source);
+                    PROGRAMS_ENDED[bufferData->source] = true;
+                    // TODO: Tu chyba moze byc taka sytuacja, ze wysle wiadomosc,
+                    // ale tez od razu info do nas ze sie skonczył.
+                    // TODO: Chyba trzeba tu dodać sprawdzenie, ze pipe od niego
+                    // jest na pewno pusty
+
+                    // If someone waited for the process that just ended, we wake him up.
+                    if (sourceIWaitFor == bufferData->source) {
+                        fprintf(stderr, "HELPER %d: Main waited for message from %d\n", WORLD_RANK, bufferData->source);
+                        remoteMainWaitedForEnded = true;
+                        ASSERT_SYS_OK(sem_post(&mainThreadStopper));
+                    }
+                } else { // Finished creating a normal message
+
+                    if (recieved && countIWaitFor == bufferData->count && sourceIWaitFor == bufferData->source &&
+                        (tagIWaitFor == bufferData->tag || (tagIWaitFor == MIMPI_ANY_TAG && bufferData->tag >= 0))) {
+                        fprintf(stderr, "HELPER %d: Someone was waiting for that exact message\n", WORLD_RANK);
+                        recieved = false;
+                        justRecieved = bufferData;
+                        ASSERT_SYS_OK(sem_post(&mainThreadStopper));
+                    } else {
+                        fprintf(stderr, "HELPER %d: No one is waiting, appending to buffer\n", WORLD_RANK);
+                        ASSERT_ZERO(pthread_mutex_lock(&bufferMutex));
+                        append(messageBuffer[bufferData->source], bufferData->source);
+                        printBufferDebug(messageBuffer);
+                        ASSERT_ZERO(pthread_mutex_unlock(&bufferMutex));
+                    }
+                }
             }
-            recievedData->count = recv_data[0];
-            recievedData->tag = recv_data[1];
-
-            if (recievedData->tag == -1) { // Proces myIndex, się skończył
-                fprintf(stderr,
-                        "HELPER %d: Got ending message from the "
-                        "process I wait for %d\n",
-                        WORLD_RANK, myIndex, myIndex);
-                PROGRAMS_ENDED[myIndex] = true;
-                // Zakończyło się coś na co czekał nasz main
-                // Trzeba sprawdzić czy main nie czekał na wiadomość od
-                // niego(tylko jak)
-                // TODO: Tu chyba moze byc taka sytuacja, ze wysle wiadomosc,
-                // ale tez od razu info do nas ze sie skonczył.
-                // TODO: Chyba trzeba tu dodać sprawdzenie, ze pipe od niego
-                // jest na pewno pusty
-                if (sourceIWaitFor == myIndex) {
-                    fprintf(stderr, "HELPER %d: Main waited for message from %d\n", WORLD_RANK, myIndex);
-                    remoteMainWaitedForEnded = true;
-                    ASSERT_SYS_OK(sem_post(&mainThreadStopper));
-                }
-            } else { // Mój proces się nie skończył, odczytuje wiadomość
-                recievedData->data = malloc(recievedData->count);
-                ASSERT_NOT_NULL(recievedData->data);
-
-                totalRead = 0;
-                totalToBeRead = recievedData->count;
-                while (totalRead < totalToBeRead) {
-                    ssize_t read = chrecv(RECV_FDS[myIndex], recievedData->data + totalRead, totalToBeRead);
-                    ASSERT_SYS_OK(read);
-                    totalRead += read;
-                }
-
-                fprintf(stderr, "HELPER %d NUMEBER %d: Read all the data\n", WORLD_RANK, myIndex);
-
-                // Tutaj recievedData powinno być już wypełnione. Można je
-                // dodać do naszego bufora
-
-                // Sprawdzamy czy ktoś czeka na to co własnie wczytaliśmy
-                // Mogly byc dwie takie same po sobie, wiec sprawdzamy czy
-                // odebrał
-                if (recieved && countIWaitFor == recievedData->count && sourceIWaitFor == myIndex &&
-                    (tagIWaitFor == recievedData->tag || (tagIWaitFor == MIMPI_ANY_TAG && recievedData->tag >= 0))) {
-                    fprintf(stderr,
-                            "HELPER %d NUMEBER %d: Someone was waiting for "
-                            "that exact "
-                            "message\n",
-                            WORLD_RANK, myIndex);
-                    recieved = false;
-                    justRecieved = recievedData;
-                    ASSERT_SYS_OK(sem_post(&mainThreadStopper));
-                } else {
-                    fprintf(stderr,
-                            "HELPER %d NUMEBER %d: No one is waiting, appending to "
-                            "buffer\n",
-                            WORLD_RANK, myIndex);
-                    ASSERT_ZERO(pthread_mutex_lock(&bufferMutex[myIndex]));
-                    append(messageBuffer[myIndex], recievedData);
-                    printBuffer(messageBuffer);
-                    ASSERT_ZERO(pthread_mutex_unlock(&bufferMutex[myIndex]));
-                }
-                continue;
-            }
-        }
-        // TODO:  Tu chyba nie potrzeba elif tylko else
-        else if (FD_ISSET(ENDING_CHANNEL_READ, &readDescriptorsSet)) {
-            // else {
-            //  Dostałem wiadomość od swojego maina, czyli musze się zakończyć.
-            fprintf(stderr, "HELPER %d: Recieved ending message from my main, breaking\n", WORLD_RANK, myIndex);
-            break;
         }
     }
-    fprintf(stderr, "HELPER %d: I Die :(\n", WORLD_RANK, myIndex);
-    return NULL;
 }
 
 void MIMPI_Init(bool enable_deadlock_detection) {
@@ -329,7 +288,7 @@ void MIMPI_Init(bool enable_deadlock_detection) {
     // Inicjalizujemy World Size i World Rank i deskryptory do komunikacji z
     // pomocnikiem
     const char *world_size_env = getenv(WORLD_SIZE_ENV);
-    const char *world_rank_env = getenv(WORLD_RANK_ENV));
+    const char *world_rank_env = getenv(WORLD_RANK_ENV);
     const char *read_fd_env = getenv(CHANNEL_READ_ENV);
     ASSERT_NOT_NULL(world_size_env);
     ASSERT_NOT_NULL(world_rank_env);
@@ -363,8 +322,8 @@ void MIMPI_Init(bool enable_deadlock_detection) {
         messageBuffer[i] = createLinkedList();
         PROGRAMS_ENDED[i] = false;
         MESSAGES_IN_BUILD[i] = NULL;
-        BUILT_MESSAGES_SIZE_COUNT[i][0] = -1;
-        BUILT_MESSAGES_SIZE_COUNT[i][1] = -1;
+        // TODO: Sprawdzamy czy jest wiadomosc za pomoca nulla wiec moze to nie potrzebne
+        BUILT_BY_NOW[i] = -1;
     }
 
     fprintf(stderr, "MAIN %d: Finished initializincg, startuing helper\n", WORLD_RANK);
@@ -468,7 +427,7 @@ MIMPI_Retcode MIMPI_Send(void const *data, int count, int destination, int tag) 
             memcpy(chunk.data, data + sentByNow, CHUNK_SIZE - sizeof(int));
             ssize_t wrote = chsend(SEND_FDS[destination], &chunk, CHUNK_SIZE);
             ASSERT_SYS_OK(wrote);
-            //TODO : moze tu while
+            // TODO : moze tu while
             assert(wrote == 256);
             sentByNow += (CHUNK_SIZE - sizeof(int));
         }
@@ -514,12 +473,13 @@ MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
         if (!found) { // Jeszcze nie ma wiadomości dla nas, czekamy.
             fprintf(stderr, "MAIN %d: No message was found, I hang myself\n", WORLD_RANK);
 
-            // Source skończył się i nie wysłał wiadomości już przed naszym czekaniem
+            // Source skończył się i nie wysłał wiadomości już przed naszym
+            // czekaniem
             if (PROGRAMS_ENDED[source]) {
                 fprintf(stderr, "MAIN %d: Remote ended\n", WORLD_RANK);
                 return MIMPI_ERROR_REMOTE_FINISHED;
             }
-            
+
             recieved = true;
             tagIWaitFor = tag;
             countIWaitFor = count;
