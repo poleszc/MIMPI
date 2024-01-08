@@ -59,11 +59,11 @@ int main(int argc, char *argv[]) {
     /// DESCRIPTORS ///
 
     // DEBUG
-    //  fprintf(stderr, "===========CHANNELS===========\n");
-    //  for (int i = 0; i < n; i++) {
-    //      fprintf(stderr, "{%d, %d} | ", channels[i][0], channels[i][1]);
-    //  }
-    //  fprintf(stderr, "\n=========================================\n");
+     fprintf(stderr, "===========CHANNELS===========\n");
+     for (int i = 0; i < n; i++) {
+         fprintf(stderr, "{%d, %d} | ", channels[i][0], channels[i][1]);
+     }
+     fprintf(stderr, "\n=========================================\n");
     // DEBUG
 
     // Ustawiamy zmienna środowiskowa oznaczjąca liczbę odpalonych równolegle
