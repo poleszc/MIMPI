@@ -21,29 +21,32 @@ typedef struct initialDataChunk {
     char *data;
 } initialDataChunk;
 
-typedef union unionInitialDataChunk {
-    int source;
-    int count;
-    int tag;
-    char data[CHUNK_SIZE];
-} unionInitialDataChunk;
+// typedef union unionInitialDataChunk {
+//     int source;
+//     int count;
+//     int tag;
+//     char data[CHUNK_SIZE];
+// } unionInitialDataChunk;
 
-typedef union unionDataChunk {
-    int source;
-    char data[CHUNK_SIZE - 3 * sizeof(int)];
-} unionDataChunk;
+// typedef union unionDataChunk {
+//     int source;
+//     char data[CHUNK_SIZE - 3 * sizeof(int)];
+// } unionDataChunk;
 
-typedef struct dataChunk {
-    int source;
-    void *data;
-} dataChunk;
+// typedef struct dataChunk {
+//     int source;
+//     void *data;
+// } dataChunk;
 
 void printMemory(void *ptr, size_t numBytes) {
     fprintf(stderr, "PRINT MEMORY\n");
     unsigned char *bytePtr = (unsigned char *)ptr; // Rzutowanie wskaźnika na bajty
 
     for (size_t i = 0; i < numBytes; i++) {
-        fprintf(stderr, "%02X ", bytePtr[i]); // Wypisanie wartości w formacie szesnastkowym
+        if (i % 32 == 0) {
+            fprintf(stderr, "\n");
+        }
+        fprintf(stderr, "%02hhX ", bytePtr[i]); // Wypisanie wartości w formacie szesnastkowym
     }
     fprintf(stderr, "\n");
 }
@@ -190,6 +193,9 @@ int tagIWaitFor = NOWAIT_TAG;
 int countIWaitFor = NOWAIT_TAG;
 int sourceIWaitFor = NOWAIT_TAG;
 bool recieved = true;
+char helperChunk[CHUNK_SIZE];
+char sendChunk[CHUNK_SIZE];
+
 // Jeżeli helper odczytał dane, na które akurat czeka recv to nie wrzuca ich bez
 // sensu do listy żeby uniknać podwójnego szukania
 initialDataChunk *justRecieved = NULL;
@@ -229,78 +235,67 @@ void *helperThreadMain() {
     fprintf(stderr, "HELPER %d:  Entered main\n", WORLD_RANK);
     while (helperThreadActive) {
         // Zawsze odczytujemy po 256 bajtow, ale moga byc cale nie wypelnione
-        void *recieved = (void *)malloc(CHUNK_SIZE);
-
+        // void *chunk = malloc(CHUNK_SIZE);
+        // ASSERT_NOT_NULL(chunk);
+        // printMemory(helperChunk, 4*sizeof(int));
         fprintf(stderr, "HELPER %d:  Waiting on chsend\n", WORLD_RANK);
-        ssize_t read = chrecv(READ_FD, recieved, CHUNK_SIZE);
+        ssize_t read = chrecv(READ_FD, helperChunk, CHUNK_SIZE);
         fprintf(stderr, "HELPER %d:  Woke up from chsend. Read %ld bytes\n", WORLD_RANK, read);
         ASSERT_SYS_OK(read);
-        // Incorrect couse there will not be always 256 bytes read
-        // assert(read == 256);
+        assert(read == 256);
 
-        int source = *(int *)recieved;
+        // printMemory(helperChunk, 4*sizeof(int));
+
+        int source;
+        memcpy(&source, helperChunk, sizeof(int));
         fprintf(stderr, "HELPER %d:  Read message from %d\n", WORLD_RANK, source);
 
         initialDataChunk *bufferData = NULL;
         if (MESSAGES_IN_BUILD[source] == NULL) { // wiadomość incjalizujaca blok, wiemy ze jest tam count i
                                                  // tu alokujemy pamiec
             fprintf(stderr, "HELPER %d:  That was a first message\n", WORLD_RANK);
-            initialDataChunk *data = (initialDataChunk *)recieved;
-            fprintf(stderr, "HELPER %d:  Casted succesfully\n", WORLD_RANK);
+            int count = *(int*)(helperChunk + sizeof(int));
+            int tag = *(int*)(helperChunk + 2 * sizeof(int));
 
-            // fprintf(stderr, "HELPER %d:  Chunk read from mem %d, %d, %d, %d\n", WORLD_RANK, data->source,
-            // data->count, data->tag, *(char *)data->data);
-            fprintf(stderr, "HELPER %d:  Chunk read from mem %d, %d, %d\n", WORLD_RANK, data->source, data->count,
-                    data->tag);
-
-            if (data->tag == -1) { // End request from parent
-                fprintf(stderr, "HELPER %d:  Process %d just ended\n", WORLD_RANK, data->source);
-                PROGRAMS_ENDED[data->source] = true;
+            if (tag == -1) { // End request from parent
+                fprintf(stderr, "HELPER %d:  Process %d just ended\n", WORLD_RANK, source);
+                PROGRAMS_ENDED[source] = true;
                 // TODO: Tu chyba moze byc taka sytuacja, ze wysle wiadomosc,
                 // ale tez od razu info do nas ze sie skonczył.
                 // TODO: Chyba trzeba tu dodać sprawdzenie, ze pipe od niego
                 // jest na pewno pusty
 
                 // If someone waited for the process that just ended, we wake him up.
-                if (sourceIWaitFor == data->source) {
-                    fprintf(stderr, "HELPER %d: Main waited for message from %d\n", WORLD_RANK, data->source);
+                if (sourceIWaitFor == source) {
+                    fprintf(stderr, "HELPER %d: Main waited for message from %d\n", WORLD_RANK, source);
                     remoteMainWaitedForEnded = true;
                     ASSERT_SYS_OK(sem_post(&mainThreadStopper));
                 }
-            } else if (data->tag == -2) { // Process of id buff->source just ended
+                continue;
+            } else if (tag == -2) { // Process of id buff->source just ended
                 fprintf(stderr, "HELPER %d:  Got ending message from parent\n", WORLD_RANK);
                 break;
+            } else {
+                fprintf(stderr, "HELPER %d: NOT an ending message\n", WORLD_RANK);
             }
 
             // TODO: Free that memory.
-            initialDataChunk *bufferData = (initialDataChunk *)malloc(sizeof(initialDataChunk));
-            bufferData->source = data->source;
-            bufferData->count = data->count;
-            bufferData->tag = data->tag;
-            void *messageCopy = (char *)malloc(bufferData->count);
-            // bufferData->data = (void *)malloc(bufferData->count);
-            ASSERT_NOT_NULL(messageCopy);
+            bufferData = (initialDataChunk *)malloc(sizeof(initialDataChunk));
+            bufferData->source = source;
+            bufferData->count = count;
+            bufferData->tag = tag;
+            bufferData->data = malloc(bufferData->count);
+            ASSERT_NOT_NULL(bufferData->data);
 
-            fprintf(stderr, "HELPER %d:  Buffer Data S %d, C %d, T %d\n", WORLD_RANK, bufferData->source,
-                    bufferData->count, bufferData->tag);
+            // fprintf(stderr, "HELPER %d:  Buffer Data S %d, C %d, T %d\n", WORLD_RANK, bufferData->source,
+            //         bufferData->count, bufferData->tag);
+            int copySize = count < CHUNK_SIZE - 3 * sizeof(int) ? count : CHUNK_SIZE - 3 * sizeof(int);
+            memcpy(bufferData->data, helperChunk + 3 * sizeof(int), copySize); 
 
-            // TODO: Maybe we need to copy a sizeof(int) bytes less
-            int copySize =
-                bufferData->count < CHUNK_SIZE - 3 * sizeof(int) ? bufferData->count : CHUNK_SIZE - 3 * sizeof(int);
-            // memcpy(bufferData->data, data->data, CHUNK_SIZE - 3 * sizeof(int));
-            fprintf(stderr, "HELPER %d:  Copying memory of size %d\n", WORLD_RANK, copySize);
-            fprintf(stderr, "HELPER %d:  Recieved %d\n", WORLD_RANK, *(int *)recieved);
-            fprintf(stderr, "HELPER %d:  Recieved %d\n", WORLD_RANK, *(int *)(recieved + sizeof(int)));
-            fprintf(stderr, "HELPER %d:  Recieved %d\n", WORLD_RANK, *(int *)(recieved + 2 * sizeof(int)));
-            fprintf(stderr, "HELPER %d:  Recieved %d\n", WORLD_RANK, *(int *)(recieved + 3 * sizeof(int)));
-            // memcpy(bufferData->data, data->data, copySize);
-
-            memcpy(messageCopy, recieved + 3 * sizeof(int) + sizeof(void *), copySize);
-            // memcpy(bufferData->data, recieved + 3 * sizeof(int), copySize);
-            fprintf(stderr, "HELPER %d:  Copied: %c\n", WORLD_RANK, *(bool *)messageCopy);
-
-            BYTES_READ_BY_NOW[source] = copySize;
+            BYTES_READ_BY_NOW[source] =  copySize;
             MESSAGES_IN_BUILD[source] = bufferData;
+            fprintf(stderr, "HELPER %d:  Copied, copySize was: %d\n", WORLD_RANK, copySize);
+            fprintf(stderr, "HELPER %d: Bufferdata in %p\n", WORLD_RANK, bufferData);
 
             if (BYTES_READ_BY_NOW[source] == MESSAGES_IN_BUILD[source]->count) {
                 fprintf(stderr, "HELPER %d:  We read all the message at once\n", WORLD_RANK);
@@ -313,21 +308,26 @@ void *helperThreadMain() {
             }
         } else { // to juz kolejyny blok z kolei, dolaczamy do istniejacego
             fprintf(stderr, "HELPER %d:  Thats NOT a first message, appending to existing block\n", WORLD_RANK);
-            dataChunk *data = (dataChunk *)recieved;
-            initialDataChunk *bufferData = MESSAGES_IN_BUILD[source];
+            bufferData = MESSAGES_IN_BUILD[source];
             int copySize = bufferData->count - BYTES_READ_BY_NOW[bufferData->source] < CHUNK_SIZE - sizeof(int)
                                ? bufferData->count - BYTES_READ_BY_NOW[bufferData->source]
                                : CHUNK_SIZE - sizeof(int);
 
-            memcpy(bufferData->data + BYTES_READ_BY_NOW[source], data->data, copySize);
+            memcpy(bufferData->data + BYTES_READ_BY_NOW[source], helperChunk + sizeof(int), copySize);
             BYTES_READ_BY_NOW[source] += copySize;
         }
 
         // We built the message, now we have to send it to main.
 
-        if (BYTES_READ_BY_NOW[source] == bufferData->count) { // Message ready
+        fprintf(stderr, "HELPER %d: Passing to main\n", WORLD_RANK);
+        fprintf(stderr, "HELPER %d: Bufferdata %p\n", WORLD_RANK, bufferData);
+
+        fprintf(stderr, "HELPER %d: Buffer data before passing: S %d, C %d, T %d\n", WORLD_RANK, bufferData->source, bufferData->count, bufferData->tag);
+        if (BYTES_READ_BY_NOW[source] == MESSAGES_IN_BUILD[source]->count) { // Message ready
                                                               // Finished creating a normal message
             // Main was waiting for that exact message
+            
+            fprintf(stderr, "HELPER %d: Got in if\n", WORLD_RANK);
             if (recieved && countIWaitFor == bufferData->count && sourceIWaitFor == bufferData->source &&
                 (tagIWaitFor == bufferData->tag || (tagIWaitFor == MIMPI_ANY_TAG && bufferData->tag >= 0))) {
                 fprintf(stderr, "HELPER %d: Someone was waiting for that exact message\n", WORLD_RANK);
@@ -411,7 +411,7 @@ void MIMPI_Finalize() {
 
     fprintf(stderr, "MAIN %d: Entered finalize\n", WORLD_RANK);
 
-    int endMess = 2137;
+    int endMess = __INT_MAX__;
     for (int i = 0; i < WORLD_SIZE; i++) {
         if (i != WORLD_RANK) {
             fprintf(stderr, "MAIN %d: Sending end message to %d\n", WORLD_RANK, i);
@@ -472,81 +472,42 @@ MIMPI_Retcode MIMPI_Send(void const *data, int count, int destination, int tag) 
                 WORLD_RANK, destination, count, tag, SEND_FDS[destination]);
 
         // Pierwszy chunk z danymi i countem, kolejne będą miały tylko source
+        // In first data chunk, first 3*sizeof(int) bytes are used to store source, count and tag. Rest is for the data.
+        // void *chunk = malloc(CHUNK_SIZE);
+        // void *chunk = calloc(CHUNK_SIZE, sizeof(char));
+        memcpy(sendChunk, &WORLD_RANK, sizeof(int));
+        memcpy(sendChunk + sizeof(int), &count, sizeof(int));
+        memcpy(sendChunk + 2 * sizeof(int), &tag, sizeof(int));
+        memcpy(sendChunk + 3 * sizeof(int), data, CHUNK_SIZE - 3 * sizeof(int));
+
+        // printMemory(chunk, 4*sizeof(int));
+
         int sentByNow = 0;
 
-        unionInitialDataChunk unionData;
-        // unionData.source = WORLD_RANK;
-        unionData.source = 1;
-        // unionData.count = count;
-        unionData.count = 2;
-        // unionData.tag = tag;
-        unionData.tag = 3;
-        memcpy(unionData.data, data, CHUNK_SIZE - 3 * sizeof(int));
-
-        fprintf(stderr, "MAIN %d: Size of union: %ld\n", WORLD_RANK, sizeof(unionInitialDataChunk));
-        if (WORLD_RANK == 0) {
-            printMemory(&unionData, 3 * sizeof(int));
-        }
-        
-
-
-
-
-        initialDataChunk* dataToSend = (initialDataChunk*)malloc(sizeof(initialDataChunk));
-        fprintf(stderr, "MAIN %d: Size of data chunk: %ld\n", WORLD_RANK, sizeof(initialDataChunk));
-        fprintf(stderr, "MAIN %d: Size of data chunk: %ld\n", WORLD_RANK, sizeof(char*));
-        // dataToSend.source = WORLD_RANK;
-        dataToSend->source = 1;
-        // dataToSend.count = count;
-        dataToSend->count = 2;
-        // dataToSend.tag = tag;
-        dataToSend->tag = 3;
-        fprintf(stderr, "MAIN %d: Malloc size: %ld\n", WORLD_RANK, CHUNK_SIZE - 3 * sizeof(int));
-        dataToSend->data = (char *)malloc(CHUNK_SIZE - 3 * sizeof(int));
-        memcpy(dataToSend->data, data, CHUNK_SIZE - 3 * sizeof(int));
-
-        // if (WORLD_RANK == 0) {
-        //     printMemory(dataToSend, sizeof(initialDataChunk));
-        // }
-
-
-        fprintf(stderr, "MAIN %d: Memory to copy: %d\n", WORLD_RANK, *(int *)data);
-        fprintf(stderr, "MAIN %d: Copied memory: %d\n", WORLD_RANK, *(int *)dataToSend->data);
-        fprintf(stderr, "MAIN %d: Size of dataToSend: %ld\n", WORLD_RANK, sizeof(dataToSend));
-        fprintf(stderr, "MAIN %d: Size of dataToSend.data: %ld\n", WORLD_RANK, sizeof(dataToSend->data));
-        
-        fprintf(stderr, "MAIN %d: DataToSend: %d\n", WORLD_RANK, *(int*)dataToSend);
-        fprintf(stderr, "MAIN %d: DataToSend + 1 int: %d\n", WORLD_RANK, *(int*)(dataToSend + sizeof(int)));
-        fprintf(stderr, "MAIN %d: DataToSend + 2 int: %d\n", WORLD_RANK, *(int*)(dataToSend + 2 * sizeof(int)));
-        fprintf(stderr, "MAIN %d: DataToSend + 3 int: %d\n", WORLD_RANK, *(int*)(dataToSend + 3 * sizeof(int)));
-        // fprintf(stderr, "MAIN %d: Size of dataToSend: %ld\n", WORLD_RANK, sizeof(dataToSend) + sizeof(dataToSend.data));
-
-        fprintf(stderr, "MAIN %d: Data to send: S %d, C %d, T %d\n", WORLD_RANK, dataToSend->source, dataToSend->count,
-                dataToSend->tag);
-
         // TODO: Moze trzeba tu dodać while'a.
-        ssize_t wrote = chsend(SEND_FDS[destination], &dataToSend, CHUNK_SIZE);
+        ssize_t wrote = chsend(SEND_FDS[destination], &sendChunk, CHUNK_SIZE);
         ASSERT_SYS_OK(wrote);
         assert(wrote == 256);
-        free(dataToSend->data);
-
         sentByNow += (CHUNK_SIZE - 3 * sizeof(int));
+        // printMemory(sendChunk, 4*sizeof(int));
 
         fprintf(stderr, "MAIN %d: Sent initial chunk\n", WORLD_RANK);
 
-        dataChunk chunk;
-        chunk.source = WORLD_RANK;
-        chunk.data = (void *)malloc(CHUNK_SIZE - sizeof(int));
+        int count = 0;
         while (sentByNow < count) {
-            fprintf(stderr, "MAIN %d: Chunk send\n", WORLD_RANK);
-            memcpy(chunk.data, data + sentByNow, CHUNK_SIZE - sizeof(int));
-            ssize_t wrote = chsend(SEND_FDS[destination], &chunk, CHUNK_SIZE);
-            ASSERT_SYS_OK(wrote);
+            fprintf(stderr, "MAIN %d: Chunk %d send\n", WORLD_RANK, count);
+
             // TODO : moze tu while
+            int toSend = CHUNK_SIZE - sizeof(int) < count - sentByNow ? CHUNK_SIZE - sizeof(int) : count - sentByNow;
+            memcpy(sendChunk + sizeof(int), data + sentByNow, CHUNK_SIZE - sizeof(int));
+            ssize_t wrote = chsend(SEND_FDS[destination], &sendChunk, toSend);
+            ASSERT_SYS_OK(wrote);
             assert(wrote == 256);
-            sentByNow += (CHUNK_SIZE - sizeof(int));
+            sentByNow += toSend;
+            count++;
         }
-        free(chunk.data);
+
+        // free(chunk);
 
         fprintf(stderr, "MAIN %d: Sent all data\n", WORLD_RANK);
         return MIMPI_SUCCESS;
@@ -576,9 +537,6 @@ MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
         // Chyba ju nie trzeba bo zanim to odczyta to musi byc pusty.
         return MIMPI_ERROR_REMOTE_FINISHED;
     }
-    // TODO: Tutaj można poddymić z tym readem zwracającym zero.
-    // else if (wysylajacy się skończyl i nie wysłał pasujacej wiadomosci)
-    // {}
     else {
         fprintf(stderr, "MAIN %d: Everything okay with the message, recieving\n", WORLD_RANK);
 
@@ -613,7 +571,7 @@ MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
                 fprintf(stderr, "MAIN %d: Remote ended during our wating\n", WORLD_RANK);
                 return MIMPI_ERROR_REMOTE_FINISHED;
             }
-            recieved = true;
+            recieved = true; // cos z tym recieved moze byc nie tak
 
             // Jak się tu obudziliśmy to na pewno jest dla nas wiadomość.
             // Oznaczmy ze nikt nie czeka, zeby pomocniczy wiedział i nie
