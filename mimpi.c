@@ -5,6 +5,7 @@
 #include <pthread.h>
 #include <semaphore.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -228,6 +229,37 @@ void printBufferDebug(LinkedList *messageBuffer[MAX_PROCESSES]) {
     fprintf(stderr, "==================================================\n");
 }
 
+int reduce(uint8_t *left, uint8_t *right, const uint8_t *father, int count, MIMPI_Op op) {
+    if (op == MIMPI_MAX) {
+        for (int i = 0; i < count; i++) {
+            if (right[i] > left[i] && right[i] > father[i]) {
+                left[i] = right[i];
+            } else if (father[i] > left[i] && father[i] > right[i]) {
+                left[i] = father[i];
+            }
+        }
+    } else if (op == MIMPI_MIN) {
+        for (int i = 0; i < count; i++) {
+            if (right[i] < left[i] && right[i] < father[i]) {
+                left[i] = right[i];
+            } else if (father[i] < left[i] && father[i] < right[i]) {
+                left[i] = father[i];
+            }
+        }
+    } else if (op == MIMPI_SUM) {
+        for (int i = 0; i < count; i++) {
+            left[i] += (right[i] + father[i]) % UINT8_MAX; // TODO: Does automatic modulo appears here?
+        }
+    } else if (op == MIMPI_PROD) {
+        for (int i = 0; i < count; i++) {
+            left[i] *= (right[i] * father[i]) % UINT8_MAX; // TODO: Does automatic modulo appears here?
+        }
+    } else { // Wrong operation
+        return -1;
+    }
+    return 0;
+}
+
 void *helperThreadMain() {
     // fprintf(stderr, "HELPER %d:  Entered main\n", WORLD_RANK);
     while (helperThreadActive) {
@@ -438,7 +470,8 @@ MIMPI_Retcode MIMPI_Send(void const *data, int count, int destination, int tag) 
 
     if (destination < 0 || destination > WORLD_SIZE - 1) {
         return MIMPI_ERROR_NO_SUCH_RANK;
-    } else if (destination == WORLD_RANK && tag != -2) { // tag -2 is an ending message to helper so we allow self send
+    } else if (destination == WORLD_RANK &&
+               tag != MAIN_THREAD_FINISHED) { // tag -2 is an ending message to helper so we allow self send
         return MIMPI_ERROR_ATTEMPTED_SELF_OP;
     } else if (PROGRAMS_ENDED[destination]) {
         return MIMPI_ERROR_REMOTE_FINISHED;
@@ -570,67 +603,305 @@ MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
 }
 
 MIMPI_Retcode MIMPI_Barrier() {
+    // fprintf(stderr, "MAIN %d: Enterend MIMPI_Barrier\n", WORLD_RANK);
     int barrierMessage = 420;
     int res;
     if (treeRelations[WORLD_RANK][1] < WORLD_SIZE && treeRelations[WORLD_RANK][1] != -1) {
+        // fprintf(stderr, "MAIN %d: Waiting for message from left son\n", WORLD_RANK);
         res = MIMPI_Recv(&barrierMessage, sizeof(int), treeRelations[WORLD_RANK][1], BARRIER_TAG);
+        // fprintf(stderr, "MAIN %d: Got message from left son\n", WORLD_RANK);
         if (res == MIMPI_ERROR_REMOTE_FINISHED) {
             return MIMPI_ERROR_REMOTE_FINISHED;
         }
     }
     if (treeRelations[WORLD_RANK][2] < WORLD_SIZE && treeRelations[WORLD_RANK][2] != -1) {
+        // fprintf(stderr, "MAIN %d: Waiting for message from right son\n", WORLD_RANK);
         res = MIMPI_Recv(&barrierMessage, sizeof(int), treeRelations[WORLD_RANK][2], BARRIER_TAG);
+        // fprintf(stderr, "MAIN %d: Got message from right son\n", WORLD_RANK);
         if (res == MIMPI_ERROR_REMOTE_FINISHED) {
             return MIMPI_ERROR_REMOTE_FINISHED;
         }
     }
 
-    if (WORLD_RANK != 0) { // We send the message to our parent, then we wait for to parent to respond. After that we wake up out children
+    if (WORLD_RANK != 0) { // We send the message to our parent, then we wait for to parent to respond. After that we
+                           // wake up out children
         barrierMessage = 420;
+        // fprintf(stderr, "MAIN %d: Sending message to our parent\n", WORLD_RANK);
         res = MIMPI_Send(&barrierMessage, sizeof(int), treeRelations[WORLD_RANK][0], BARRIER_TAG);
         if (res == MIMPI_ERROR_REMOTE_FINISHED) {
             return MIMPI_ERROR_REMOTE_FINISHED;
         }
 
+        // fprintf(stderr, "MAIN %d: Waiting for message from our parent\n", WORLD_RANK);
         res = MIMPI_Recv(&barrierMessage, sizeof(int), treeRelations[WORLD_RANK][0], BARRIER_TAG);
+        // fprintf(stderr, "MAIN %d: Got message from our parent\n", WORLD_RANK);
         if (res == MIMPI_ERROR_REMOTE_FINISHED) {
             return MIMPI_ERROR_REMOTE_FINISHED;
         }
 
         if (treeRelations[WORLD_RANK][1] < WORLD_SIZE && treeRelations[WORLD_RANK][1] != -1) {
+            // fprintf(stderr, "MAIN %d: Waking up left son\n", WORLD_RANK);
             res = MIMPI_Send(&barrierMessage, sizeof(int), treeRelations[WORLD_RANK][1], BARRIER_TAG);
             if (res == MIMPI_ERROR_REMOTE_FINISHED) {
                 return MIMPI_ERROR_REMOTE_FINISHED;
             }
         }
         if (treeRelations[WORLD_RANK][2] < WORLD_SIZE && treeRelations[WORLD_RANK][2] != -1) {
-            res = MIMPI_Recv(&barrierMessage, sizeof(int), treeRelations[WORLD_RANK][2], BARRIER_TAG);
+            // fprintf(stderr, "MAIN %d: Waking up right son\n", WORLD_RANK);
+            res = MIMPI_Send(&barrierMessage, sizeof(int), treeRelations[WORLD_RANK][2], BARRIER_TAG);
             if (res == MIMPI_ERROR_REMOTE_FINISHED) {
                 return MIMPI_ERROR_REMOTE_FINISHED;
             }
         }
     } else { // if zero gets a message it starts waking everyone up
+        // fprintf(stderr, "MAIN %d: ROOT GOT PINGED\n", WORLD_RANK);
         if (treeRelations[WORLD_RANK][1] < WORLD_SIZE && treeRelations[WORLD_RANK][1] != -1) {
+            // fprintf(stderr, "MAIN %d: ROOT wakes up first child\n", WORLD_RANK);
             res = MIMPI_Send(&barrierMessage, sizeof(int), treeRelations[WORLD_RANK][1], BARRIER_TAG);
             if (res == MIMPI_ERROR_REMOTE_FINISHED) {
                 return MIMPI_ERROR_REMOTE_FINISHED;
             }
         }
         if (treeRelations[WORLD_RANK][2] < WORLD_SIZE && treeRelations[WORLD_RANK][2] != -1) {
-            res = MIMPI_Recv(&barrierMessage, sizeof(int), treeRelations[WORLD_RANK][2], BARRIER_TAG);
+            // fprintf(stderr, "MAIN %d: ROOT wakes up second child\n", WORLD_RANK);
+            res = MIMPI_Send(&barrierMessage, sizeof(int), treeRelations[WORLD_RANK][2], BARRIER_TAG);
             if (res == MIMPI_ERROR_REMOTE_FINISHED) {
                 return MIMPI_ERROR_REMOTE_FINISHED;
             }
         }
     }
+    return MIMPI_SUCCESS;
 }
 
-MIMPI_Retcode MIMPI_Bcast(void *data, int count, int root){
-    TODO
-    // Wysyła dane zapewnione przez proces o randze root do WSZSYTKICH
-    // pozostałych procesow
+MIMPI_Retcode MIMPI_Bcast(void *data, int count, int root) {
+    // fprintf(stderr, "MAIN %d: Enterend MIMPI_Barrier\n", WORLD_RANK);
+    if (root < 0 || root > WORLD_SIZE - 1) {
+        return MIMPI_ERROR_NO_SUCH_RANK;
+    }
+    int barrierMessage = 420;
+    int res;
+    if (WORLD_RANK == 0 && root != 0) { // We're substituting the tree root(0) with the broadcast root,
+        if (treeRelations[root][1] < WORLD_SIZE && treeRelations[root][1] != -1) {
+            // fprintf(stderr, "MAIN %d: Waiting for message from left son\n", WORLD_RANK);
+            res = MIMPI_Recv(&barrierMessage, sizeof(int), treeRelations[root][1], BARRIER_TAG);
+            // fprintf(stderr, "MAIN %d: Got message from left son\n", WORLD_RANK);
+            if (res == MIMPI_ERROR_REMOTE_FINISHED) {
+                return MIMPI_ERROR_REMOTE_FINISHED;
+            }
+        }
+        if (treeRelations[root][2] < WORLD_SIZE && treeRelations[root][2] != -1) {
+            // fprintf(stderr, "MAIN %d: Waiting for message from right son\n", WORLD_RANK);
+            res = MIMPI_Recv(&barrierMessage, sizeof(int), treeRelations[root][2], BARRIER_TAG);
+            // fprintf(stderr, "MAIN %d: Got message from right son\n", WORLD_RANK);
+            if (res == MIMPI_ERROR_REMOTE_FINISHED) {
+                return MIMPI_ERROR_REMOTE_FINISHED;
+            }
+        }
+    } else if (WORLD_RANK == root) { // TODO: This can crash if root is 0
+        if (treeRelations[0][1] < WORLD_SIZE && treeRelations[0][1] != -1) {
+            // fprintf(stderr, "MAIN %d: Waiting for message from left son\n", WORLD_RANK);
+            res = MIMPI_Recv(&barrierMessage, sizeof(int), treeRelations[0][1], BARRIER_TAG);
+            // fprintf(stderr, "MAIN %d: Got message from left son\n", WORLD_RANK);
+            if (res == MIMPI_ERROR_REMOTE_FINISHED) {
+                return MIMPI_ERROR_REMOTE_FINISHED;
+            }
+        }
+        if (treeRelations[0][2] < WORLD_SIZE && treeRelations[0][2] != -1) {
+            // fprintf(stderr, "MAIN %d: Waiting for message from right son\n", WORLD_RANK);
+            res = MIMPI_Recv(&barrierMessage, sizeof(int), treeRelations[0][2], BARRIER_TAG);
+            // fprintf(stderr, "MAIN %d: Got message from right son\n", WORLD_RANK);
+            if (res == MIMPI_ERROR_REMOTE_FINISHED) {
+                return MIMPI_ERROR_REMOTE_FINISHED;
+            }
+        }
+    } else {
+        if (treeRelations[WORLD_RANK][1] < WORLD_SIZE && treeRelations[WORLD_RANK][1] != -1) {
+            // fprintf(stderr, "MAIN %d: Waiting for message from left son\n", WORLD_RANK);
+            res = MIMPI_Recv(&barrierMessage, sizeof(int), treeRelations[WORLD_RANK][1], BARRIER_TAG);
+            // fprintf(stderr, "MAIN %d: Got message from left son\n", WORLD_RANK);
+            if (res == MIMPI_ERROR_REMOTE_FINISHED) {
+                return MIMPI_ERROR_REMOTE_FINISHED;
+            }
+        }
+        if (treeRelations[WORLD_RANK][2] < WORLD_SIZE && treeRelations[WORLD_RANK][2] != -1) {
+            // fprintf(stderr, "MAIN %d: Waiting for message from right son\n", WORLD_RANK);
+            res = MIMPI_Recv(&barrierMessage, sizeof(int), treeRelations[WORLD_RANK][2], BARRIER_TAG);
+            // fprintf(stderr, "MAIN %d: Got message from right son\n", WORLD_RANK);
+            if (res == MIMPI_ERROR_REMOTE_FINISHED) {
+                return MIMPI_ERROR_REMOTE_FINISHED;
+            }
+        }
+    }
+
+    if (root != 0 && WORLD_RANK == 0) { // Substituting 0 and root
+        barrierMessage = 420;
+        // fprintf(stderr, "MAIN %d: Sending message to our parent\n", WORLD_RANK);
+        res = MIMPI_Send(&barrierMessage, sizeof(int), treeRelations[root][0], BARRIER_TAG);
+        if (res == MIMPI_ERROR_REMOTE_FINISHED) {
+            return MIMPI_ERROR_REMOTE_FINISHED;
+        }
+
+        // Waiting for the message from above. It should contain the data
+        // fprintf(stderr, "MAIN %d: Waiting for message from our parent\n", WORLD_RANK);
+        res = MIMPI_Recv(data, count, treeRelations[root][0], BARRIER_TAG);
+        // fprintf(stderr, "MAIN %d: Got message from our parent\n", WORLD_RANK);
+        if (res == MIMPI_ERROR_REMOTE_FINISHED) {
+            return MIMPI_ERROR_REMOTE_FINISHED;
+        }
+        // Sending the data message down
+        if (treeRelations[root][1] < WORLD_SIZE && treeRelations[root][1] != -1) {
+            // fprintf(stderr, "MAIN %d: Waking up left son\n", WORLD_RANK);
+            res = MIMPI_Send(data, count, treeRelations[root][1], BARRIER_TAG);
+            if (res == MIMPI_ERROR_REMOTE_FINISHED) {
+                return MIMPI_ERROR_REMOTE_FINISHED;
+            }
+        }
+        if (treeRelations[root][2] < WORLD_SIZE && treeRelations[root][2] != -1) {
+            // fprintf(stderr, "MAIN %d: Waking up right son\n", WORLD_RANK);
+            res = MIMPI_Send(data, count, treeRelations[root][2], BARRIER_TAG);
+            if (res == MIMPI_ERROR_REMOTE_FINISHED) {
+                return MIMPI_ERROR_REMOTE_FINISHED;
+            }
+        }
+    } else if (WORLD_RANK != root) {
+        barrierMessage = 420;
+        // fprintf(stderr, "MAIN %d: Sending message to our parent\n", WORLD_RANK);
+        res = MIMPI_Send(&barrierMessage, sizeof(int), treeRelations[WORLD_RANK][0], BARRIER_TAG);
+        if (res == MIMPI_ERROR_REMOTE_FINISHED) {
+            return MIMPI_ERROR_REMOTE_FINISHED;
+        }
+
+        // Waiting for the message from above. It should contain the data
+        // fprintf(stderr, "MAIN %d: Waiting for message from our parent\n", WORLD_RANK);
+        res = MIMPI_Recv(data, count, treeRelations[WORLD_RANK][0], BARRIER_TAG);
+        // fprintf(stderr, "MAIN %d: Got message from our parent\n", WORLD_RANK);
+        if (res == MIMPI_ERROR_REMOTE_FINISHED) {
+            return MIMPI_ERROR_REMOTE_FINISHED;
+        }
+
+        // Sending the data message down
+        if (treeRelations[WORLD_RANK][1] < WORLD_SIZE && treeRelations[WORLD_RANK][1] != -1) {
+            // fprintf(stderr, "MAIN %d: Waking up left son\n", WORLD_RANK);
+            res = MIMPI_Send(data, count, treeRelations[WORLD_RANK][1], BARRIER_TAG);
+            if (res == MIMPI_ERROR_REMOTE_FINISHED) {
+                return MIMPI_ERROR_REMOTE_FINISHED;
+            }
+        }
+        if (treeRelations[WORLD_RANK][2] < WORLD_SIZE && treeRelations[WORLD_RANK][2] != -1) {
+            // fprintf(stderr, "MAIN %d: Waking up right son\n", WORLD_RANK);
+            res = MIMPI_Send(data, count, treeRelations[WORLD_RANK][2], BARRIER_TAG);
+            if (res == MIMPI_ERROR_REMOTE_FINISHED) {
+                return MIMPI_ERROR_REMOTE_FINISHED;
+            }
+        }
+    } else if (WORLD_RANK == root) {
+        // Start sending the message down the tree.
+        if (treeRelations[0][1] < WORLD_SIZE && treeRelations[0][1] != -1) {
+            // fprintf(stderr, "MAIN %d: ROOT wakes up first child\n", WORLD_RANK);
+            res = MIMPI_Send(data, count, treeRelations[0][1], BARRIER_TAG);
+            if (res == MIMPI_ERROR_REMOTE_FINISHED) {
+                return MIMPI_ERROR_REMOTE_FINISHED;
+            }
+        }
+        if (treeRelations[0][2] < WORLD_SIZE && treeRelations[0][2] != -1) {
+            fprintf(stderr, "MAIN %d: ROOT wakes up second child\n", WORLD_RANK);
+            res = MIMPI_Send(data, count, treeRelations[0][2], BARRIER_TAG);
+            if (res == MIMPI_ERROR_REMOTE_FINISHED) {
+                return MIMPI_ERROR_REMOTE_FINISHED;
+            }
+        }
+    } else {
+        fprintf(stderr, "MAIN %d: WE SHOULDN'T BE HERE SOMETHING WENT WRONG\n", WORLD_RANK);
+    }
+    return MIMPI_SUCCESS;
 }
 
 MIMPI_Retcode MIMPI_Reduce(void const *send_data, void *recv_data, int count, MIMPI_Op op, int root) {
-    TODO
+    // fprintf(stderr, "MAIN %d: Enterend MIMPI_Barrier\n", WORLD_RANK);
+    if (root < 0 || root > WORLD_SIZE - 1) {
+        return MIMPI_ERROR_NO_SUCH_RANK;
+    }
+    void *leftSonMess = malloc(count);
+    void *rightSonMess = malloc(count);
+    int res;
+
+    if (WORLD_RANK == 0 && root != 0) { // We're substituting the tree root(0) with the broadcast root,
+        if (treeRelations[root][1] < WORLD_SIZE && treeRelations[root][1] != -1) {
+            // fprintf(stderr, "MAIN %d: Waiting for message from left son\n", WORLD_RANK);
+            res = MIMPI_Recv(leftSonMess, count, treeRelations[root][1], BARRIER_TAG);
+            // fprintf(stderr, "MAIN %d: Got message from left son\n", WORLD_RANK);
+            if (res == MIMPI_ERROR_REMOTE_FINISHED) {
+                return MIMPI_ERROR_REMOTE_FINISHED;
+            }
+        }
+        if (treeRelations[root][2] < WORLD_SIZE && treeRelations[root][2] != -1) {
+            // fprintf(stderr, "MAIN %d: Waiting for message from right son\n", WORLD_RANK);
+            res = MIMPI_Recv(rightSonMess, count, treeRelations[root][2], BARRIER_TAG);
+            // fprintf(stderr, "MAIN %d: Got message from right son\n", WORLD_RANK);
+            if (res == MIMPI_ERROR_REMOTE_FINISHED) {
+                return MIMPI_ERROR_REMOTE_FINISHED;
+            }
+        }
+
+    } else if (WORLD_RANK == root) { // TODO: This can crash if root is 0
+        if (treeRelations[0][1] < WORLD_SIZE && treeRelations[0][1] != -1) {
+            // fprintf(stderr, "MAIN %d: Waiting for message from left son\n", WORLD_RANK);
+            res = MIMPI_Recv(leftSonMess, count, treeRelations[0][1], BARRIER_TAG);
+            // fprintf(stderr, "MAIN %d: Got message from left son\n", WORLD_RANK);
+            if (res == MIMPI_ERROR_REMOTE_FINISHED) {
+                return MIMPI_ERROR_REMOTE_FINISHED;
+            }
+        }
+        if (treeRelations[0][2] < WORLD_SIZE && treeRelations[0][2] != -1) {
+            // fprintf(stderr, "MAIN %d: Waiting for message from right son\n", WORLD_RANK);
+            res = MIMPI_Recv(rightSonMess, count, treeRelations[0][2], BARRIER_TAG);
+            // fprintf(stderr, "MAIN %d: Got message from right son\n", WORLD_RANK);
+            if (res == MIMPI_ERROR_REMOTE_FINISHED) {
+                return MIMPI_ERROR_REMOTE_FINISHED;
+            }
+        }
+    } else {
+        if (treeRelations[WORLD_RANK][1] < WORLD_SIZE && treeRelations[WORLD_RANK][1] != -1) {
+            // fprintf(stderr, "MAIN %d: Waiting for message from left son\n", WORLD_RANK);
+            res = MIMPI_Recv(leftSonMess, count, treeRelations[WORLD_RANK][1], BARRIER_TAG);
+            // fprintf(stderr, "MAIN %d: Got message from left son\n", WORLD_RANK);
+            if (res == MIMPI_ERROR_REMOTE_FINISHED) {
+                return MIMPI_ERROR_REMOTE_FINISHED;
+            }
+        }
+        if (treeRelations[WORLD_RANK][2] < WORLD_SIZE && treeRelations[WORLD_RANK][2] != -1) {
+            // fprintf(stderr, "MAIN %d: Waiting for message from right son\n", WORLD_RANK);
+            res = MIMPI_Recv(rightSonMess, count, treeRelations[WORLD_RANK][2], BARRIER_TAG);
+            // fprintf(stderr, "MAIN %d: Got message from right son\n", WORLD_RANK);
+            if (res == MIMPI_ERROR_REMOTE_FINISHED) {
+                return MIMPI_ERROR_REMOTE_FINISHED;
+            }
+        }
+    }
+    int reduceRes = reduce(leftSonMess, rightSonMess, send_data, count, op);
+    assert(reduceRes == 0);
+    // After that the reduced message is in leftSonMess
+    free(rightSonMess);
+
+    if (root != 0 && WORLD_RANK == 0) { // Substituting 0 and root
+        // fprintf(stderr, "MAIN %d: Sending message to our parent\n", WORLD_RANK);
+        res = MIMPI_Send(leftSonMess, count, treeRelations[root][0], BARRIER_TAG);
+        if (res == MIMPI_ERROR_REMOTE_FINISHED) {
+            return MIMPI_ERROR_REMOTE_FINISHED;
+        }
+    } else if (WORLD_RANK != root) {
+        // fprintf(stderr, "MAIN %d: Sending message to our parent\n", WORLD_RANK);
+        res = MIMPI_Send(leftSonMess, count, treeRelations[WORLD_RANK][0], BARRIER_TAG);
+        if (res == MIMPI_ERROR_REMOTE_FINISHED) {
+            return MIMPI_ERROR_REMOTE_FINISHED;
+        }
+    } else if (WORLD_RANK == root) {
+        // Start sending the message down the tree.
+        memcpy(recv_data, leftSonMess, count);
+    } else {
+        fprintf(stderr, "MAIN %d: WE SHOULDN'T BE HERE SOMETHING WENT WRONG\n", WORLD_RANK);
+    }
+    free(leftSonMess);
+
+    return MIMPI_SUCCESS;
 }
