@@ -168,6 +168,9 @@ initialDataChunk *searchAndRemoveMessage(LinkedList *list, int tag, int count) {
 // Oznacza, ze proces główny nie czeka na odebranie wiadomosci.
 // Nie można go używać żeby wysyłać pomocnicze wiadomości do procesów.
 #define NOWAIT_TAG -1
+#define REMOTE_FINISHED -2
+#define MAIN_THREAD_FINISHED -3
+#define BARRIER_TAG -4
 #define WORLD_SIZE_ENV "MIMPI_WORLD_SIZE"
 #define WORLD_RANK_ENV "MIMPI_WORLD_RANK"
 #define CHANNEL_READ_ENV "MIMPI_CHANNEL_READ"
@@ -207,6 +210,13 @@ bool recieved = true;
 char helperChunk[CHUNK_SIZE];
 char sendChunk[CHUNK_SIZE];
 
+// [i][0] -> i-th parent
+// [i][1] -> i-th left child
+// [i][0] -> i-th right child
+int treeRelations[MAX_PROCESSES][3] = {{-1, 1, 2},  {0, 3, 5},   {0, 4, 6},   {1, 7, 11},  {2, 9, 13},  {1, 8, 12},
+                                       {2, 10, 14}, {3, 15, -1}, {5, -1, -1}, {4, -1, -1}, {6, -1, -1}, {3, -1, -1},
+                                       {5, -1, -1}, {4, -1, -1}, {6, -1, -1}, {7, -1, -1}};
+
 ///////// MY GLOBALS END /////////
 
 void printBufferDebug(LinkedList *messageBuffer[MAX_PROCESSES]) {
@@ -222,7 +232,7 @@ void *helperThreadMain() {
     // fprintf(stderr, "HELPER %d:  Entered main\n", WORLD_RANK);
     while (helperThreadActive) {
         // fprintf(stderr, "HELPER %d:  Waiting on chsend\n", WORLD_RANK);
-        
+
         // We always recieve 256 byte blocks, although they are not always filled with data
         ssize_t read = chrecv(READ_FD, helperChunk, CHUNK_SIZE);
         ASSERT_SYS_OK(read);
@@ -240,7 +250,7 @@ void *helperThreadMain() {
             int count = *(int *)(helperChunk + sizeof(int));
             int tag = *(int *)(helperChunk + 2 * sizeof(int));
 
-            if (tag == -1) { // Process of id source just ended.
+            if (tag == REMOTE_FINISHED) { // Process of id source just ended.
                 // fprintf(stderr, "HELPER %d:  Process %d just ended\n", WORLD_RANK, source);
                 PROGRAMS_ENDED[source] = true;
                 // If main was waiting for the process that just ended, we wake him up and tell him to crash.
@@ -250,7 +260,7 @@ void *helperThreadMain() {
                     ASSERT_SYS_OK(sem_post(&mainThreadStopper));
                 }
                 continue;
-            } else if (tag == -2) { // End request from parent.
+            } else if (tag == MAIN_THREAD_FINISHED) { // End request from parent.
                 // fprintf(stderr, "HELPER %d:  Got ending message from parent\n", WORLD_RANK);
                 break;
             }
@@ -270,7 +280,7 @@ void *helperThreadMain() {
             MESSAGES_IN_BUILD[source] = bufferData;
 
             // TODO: remove that
-            if (BYTES_READ_BY_NOW[source] > MESSAGES_IN_BUILD[source]->count) { 
+            if (BYTES_READ_BY_NOW[source] > MESSAGES_IN_BUILD[source]->count) {
                 assert(false);
             }
         } else { // Not the first block, appending to message in build.
@@ -292,7 +302,7 @@ void *helperThreadMain() {
         // bufferData->count, bufferData->tag);
         if (BYTES_READ_BY_NOW[source] == MESSAGES_IN_BUILD[source]->count) { // Message was built in whole.
             // fprintf(stderr, "HELPER %d: Passing to main\n", WORLD_RANK);
-            
+
             // Main was waiting for that exact message
             if (recieved && countIWaitFor == bufferData->count && sourceIWaitFor == bufferData->source &&
                 (tagIWaitFor == bufferData->tag || (tagIWaitFor == MIMPI_ANY_TAG && bufferData->tag >= 0))) {
@@ -383,7 +393,7 @@ void MIMPI_Finalize() {
         if (i != WORLD_RANK && !PROGRAMS_ENDED[i]) {
             // fprintf(stderr, "MAIN %d: Sending end message to %d\n", WORLD_RANK, i);
 
-            int res = MIMPI_Send(&endMess, sizeof(endMess), i, -1);
+            int res = MIMPI_Send(&endMess, sizeof(endMess), i, REMOTE_FINISHED);
             if (res != MIMPI_SUCCESS) {
                 fprintf(stderr, "MAIN %d: MIMPI_SEND FAILED: %d\n", WORLD_RANK, res);
             }
@@ -391,7 +401,7 @@ void MIMPI_Finalize() {
     }
     // Sending message to ourself to stop helper.
     // fprintf(stderr, "MAIN %d: Sending end message to our helper\n", WORLD_RANK);
-    int res = MIMPI_Send(&endMess, sizeof(endMess), WORLD_RANK, -2);
+    int res = MIMPI_Send(&endMess, sizeof(endMess), WORLD_RANK, MAIN_THREAD_FINISHED);
     if (res != MIMPI_SUCCESS) {
         fprintf(stderr, "MAIN %d: MIMPI_SEND FAILED\n", WORLD_RANK);
     }
@@ -559,7 +569,61 @@ MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
     }
 }
 
-MIMPI_Retcode MIMPI_Barrier(){TODO}
+MIMPI_Retcode MIMPI_Barrier() {
+    int barrierMessage = 420;
+    int res;
+    if (treeRelations[WORLD_RANK][1] < WORLD_SIZE && treeRelations[WORLD_RANK][1] != -1) {
+        res = MIMPI_Recv(&barrierMessage, sizeof(int), treeRelations[WORLD_RANK][1], BARRIER_TAG);
+        if (res == MIMPI_ERROR_REMOTE_FINISHED) {
+            return MIMPI_ERROR_REMOTE_FINISHED;
+        }
+    }
+    if (treeRelations[WORLD_RANK][2] < WORLD_SIZE && treeRelations[WORLD_RANK][2] != -1) {
+        res = MIMPI_Recv(&barrierMessage, sizeof(int), treeRelations[WORLD_RANK][2], BARRIER_TAG);
+        if (res == MIMPI_ERROR_REMOTE_FINISHED) {
+            return MIMPI_ERROR_REMOTE_FINISHED;
+        }
+    }
+
+    if (WORLD_RANK != 0) { // We send the message to our parent, then we wait for to parent to respond. After that we wake up out children
+        barrierMessage = 420;
+        res = MIMPI_Send(&barrierMessage, sizeof(int), treeRelations[WORLD_RANK][0], BARRIER_TAG);
+        if (res == MIMPI_ERROR_REMOTE_FINISHED) {
+            return MIMPI_ERROR_REMOTE_FINISHED;
+        }
+
+        res = MIMPI_Recv(&barrierMessage, sizeof(int), treeRelations[WORLD_RANK][0], BARRIER_TAG);
+        if (res == MIMPI_ERROR_REMOTE_FINISHED) {
+            return MIMPI_ERROR_REMOTE_FINISHED;
+        }
+
+        if (treeRelations[WORLD_RANK][1] < WORLD_SIZE && treeRelations[WORLD_RANK][1] != -1) {
+            res = MIMPI_Send(&barrierMessage, sizeof(int), treeRelations[WORLD_RANK][1], BARRIER_TAG);
+            if (res == MIMPI_ERROR_REMOTE_FINISHED) {
+                return MIMPI_ERROR_REMOTE_FINISHED;
+            }
+        }
+        if (treeRelations[WORLD_RANK][2] < WORLD_SIZE && treeRelations[WORLD_RANK][2] != -1) {
+            res = MIMPI_Recv(&barrierMessage, sizeof(int), treeRelations[WORLD_RANK][2], BARRIER_TAG);
+            if (res == MIMPI_ERROR_REMOTE_FINISHED) {
+                return MIMPI_ERROR_REMOTE_FINISHED;
+            }
+        }
+    } else { // if zero gets a message it starts waking everyone up
+        if (treeRelations[WORLD_RANK][1] < WORLD_SIZE && treeRelations[WORLD_RANK][1] != -1) {
+            res = MIMPI_Send(&barrierMessage, sizeof(int), treeRelations[WORLD_RANK][1], BARRIER_TAG);
+            if (res == MIMPI_ERROR_REMOTE_FINISHED) {
+                return MIMPI_ERROR_REMOTE_FINISHED;
+            }
+        }
+        if (treeRelations[WORLD_RANK][2] < WORLD_SIZE && treeRelations[WORLD_RANK][2] != -1) {
+            res = MIMPI_Recv(&barrierMessage, sizeof(int), treeRelations[WORLD_RANK][2], BARRIER_TAG);
+            if (res == MIMPI_ERROR_REMOTE_FINISHED) {
+                return MIMPI_ERROR_REMOTE_FINISHED;
+            }
+        }
+    }
+}
 
 MIMPI_Retcode MIMPI_Bcast(void *data, int count, int root){
     TODO
