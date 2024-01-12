@@ -15,6 +15,9 @@
 
 #define CHUNK_SIZE 256
 
+int WORLD_SIZE;
+int WORLD_RANK;
+
 typedef struct initialDataChunk {
     int source;
     int count;
@@ -143,20 +146,35 @@ void deleteLinkedList(LinkedList *list) {
 // Finds and removes first message which matches the tag and count.
 // Returns NULL if no such message was found.
 initialDataChunk *searchAndRemoveMessage(LinkedList *list, int tag, int count) {
+    fprintf(stderr, "MAIN %d: BUFFER IN SEARCH OF T %d, C %d\n", WORLD_RANK, tag, count);
     Node *curr = list->head;
-    bool inWhile = false;
 
     if (!list->head && !list->tail) { // Buffer is empty.
+        fprintf(stderr, "MAIN %d: BUFFER EMPTY\n", WORLD_RANK);
         return NULL;
     }
-    while (curr != list->tail && ((tag == MIMPI_ANY_TAG && curr->data->count != count) ||
-                                  (curr->data->tag != tag || curr->data->count != count))) {
-        inWhile = true;
+    while (1) {
+        if (!curr) { // curr is NULL, nothing was found
+            fprintf(stderr, "MAIN %d: end of buffer, none was found\n", WORLD_RANK);
+            return NULL;
+        }
+        fprintf(stderr, "MAIN %d: In while C %d, T %d, S %d\n", WORLD_RANK, curr->data->count, curr->data->tag,
+                curr->data->source);
+        if (tag == MIMPI_ANY_TAG && curr->data->count == count) {
+            // We found it
+            fprintf(stderr, "MAIN %d: found with anytag\n", WORLD_RANK);
+            break;
+        }
+        if (curr->data->tag == tag && curr->data->count == count) {
+            // We found it
+            fprintf(stderr, "MAIN %d: found with specified\n", WORLD_RANK);
+            break;
+        }
         curr = curr->next;
     }
-    if (inWhile && curr == list->tail) { // No message was found.
-        return NULL;
-    }
+
+    fprintf(stderr, "MAIN %d: Message was found:  C %d, T %d, S %d\n", WORLD_RANK, curr->data->count,
+            curr->data->tag, curr->data->source);
 
     initialDataChunk *data = curr->data;
     deleteNode(list, curr);
@@ -179,8 +197,7 @@ initialDataChunk *searchAndRemoveMessage(LinkedList *list, int tag, int count) {
 #define CHANNEL_READ_ENV "MIMPI_CHANNEL_READ"
 
 bool DEADLOCK_DETECTION;
-int WORLD_SIZE;
-int WORLD_RANK;
+
 // Did i-th program end.
 bool PROGRAMS_ENDED[MAX_PROCESSES];
 // FD for writing to i-th program.
@@ -223,10 +240,16 @@ int treeRelations[MAX_PROCESSES][3] = {{-1, 1, 2},  {0, 3, 5},   {0, 4, 6},   {1
 ///////// MY GLOBALS END /////////
 
 void printBufferDebug(LinkedList *messageBuffer[MAX_PROCESSES]) {
-    fprintf(stderr, "======================BUFFER======================\n");
+    fprintf(stderr, "======================BUFFER %d======================\n", WORLD_RANK);
     for (int i = 0; i < WORLD_SIZE; i++) {
-        fprintf(stderr, "%d:   ", i);
-        displayList(messageBuffer[i]);
+        fprintf(stderr, "RANK %d , FROM %d:   ", WORLD_RANK, i);
+        // displayList(messageBuffer[i]);
+        Node *temp = messageBuffer[i]->head;
+        while (temp != NULL) {
+            fprintf(stderr, "(%d, %d) -> ", temp->data->tag, temp->data->count);
+            temp = temp->next;
+        }
+        fprintf(stderr, "NULL\n");
     }
     fprintf(stderr, "==================================================\n");
 }
@@ -285,7 +308,7 @@ void *helperThreadMain() {
             int tag = *(int *)(helperChunk + 2 * sizeof(int));
 
             if (tag == REMOTE_FINISHED) { // Process of id source just ended.
-                // fprintf(stderr, "HELPER %d:  Process %d just ended\n", WORLD_RANK, source);
+                fprintf(stderr, "HELPER %d:  Process %d just ended\n", WORLD_RANK, source);
                 PROGRAMS_ENDED[source] = true;
                 // If main was waiting for the process that just ended, we wake him up and tell him to crash.
                 if (sourceIWaitFor == source) {
@@ -297,6 +320,8 @@ void *helperThreadMain() {
             } else if (tag == MAIN_THREAD_FINISHED) { // End request from parent.
                 fprintf(stderr, "HELPER %d:  Got ending message from parent\n", WORLD_RANK);
                 break;
+            } else if (tag == BARRIER_TAG || tag == BROADCAST_TAG || tag == REDUCE_TAG) {
+                fprintf(stderr, "HELPER %d:  Recieved a GROUP synchronizing message\n", WORLD_RANK);
             }
 
             // TODO: Free that memory.
@@ -338,6 +363,7 @@ void *helperThreadMain() {
             // fprintf(stderr, "HELPER %d: Passing to main\n", WORLD_RANK);
 
             // Main was waiting for that exact message
+            ASSERT_ZERO(pthread_mutex_lock(&bufferMutex));
             if (recieved && countIWaitFor == bufferData->count && sourceIWaitFor == bufferData->source &&
                 (tagIWaitFor == bufferData->tag || (tagIWaitFor == MIMPI_ANY_TAG && bufferData->tag >= 0))) {
                 fprintf(stderr, "HELPER %d: Someone was waiting for that exact message\n", WORLD_RANK);
@@ -345,13 +371,14 @@ void *helperThreadMain() {
                 justRecieved = bufferData;
                 MESSAGES_IN_BUILD[source] = NULL;
                 BYTES_READ_BY_NOW[source] = -1;
+                ASSERT_ZERO(pthread_mutex_unlock(&bufferMutex));
                 ASSERT_SYS_OK(sem_post(&mainThreadStopper));
             } else { // Main didn't wait for that message, adding to buffer
                 fprintf(stderr, "HELPER %d: No one is waiting, appending to buffer\n", WORLD_RANK);
-                ASSERT_ZERO(pthread_mutex_lock(&bufferMutex));
                 append(messageBuffer[source], bufferData);
                 MESSAGES_IN_BUILD[source] = NULL;
                 BYTES_READ_BY_NOW[source] = -1;
+                printBufferDebug(messageBuffer);
                 ASSERT_ZERO(pthread_mutex_unlock(&bufferMutex));
             }
         }
@@ -522,21 +549,23 @@ MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
         return MIMPI_ERROR_ATTEMPTED_SELF_OP;
     }
     ASSERT_ZERO(pthread_mutex_lock(&bufferMutex));
-    initialDataChunk *found = searchAndRemoveMessage(messageBuffer[source], tag, count);
-    ASSERT_ZERO(pthread_mutex_unlock(&bufferMutex));
     printBufferDebug(messageBuffer);
+    initialDataChunk *found = searchAndRemoveMessage(messageBuffer[source], tag, count);
+
+    // printBufferDebug(messageBuffer);
 
     // Debug
     if (!found) {
-        // fprintf(stderr, "MAIN %d: Didn't find a message from source %d\n", WORLD_RANK, source);
+        fprintf(stderr, "MAIN %d: Didn't find a message from source %d\n", WORLD_RANK, source);
     } else {
-        // fprintf(stderr, "MAIN %d: Found a message from source %d\n", WORLD_RANK, source);
+        fprintf(stderr, "MAIN %d: Found a message from source %d\n", WORLD_RANK, source);
     }
 
     if (!found && PROGRAMS_ENDED[source]) {
         // fprintf(stderr, "MAIN %d: Source ended\n", WORLD_RANK);
         // TODO: Tu trzeba sprawdzić czy pipe od niego jest pusty, bo
         // Chyba ju nie trzeba bo zanim to odczyta to musi byc pusty.
+        ASSERT_ZERO(pthread_mutex_unlock(&bufferMutex));
         return MIMPI_ERROR_REMOTE_FINISHED;
     } else {
         // fprintf(stderr, "MAIN %d: Everything okay with the message, recieving\n", WORLD_RANK);
@@ -555,6 +584,7 @@ MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
             tagIWaitFor = tag;
             countIWaitFor = count;
             sourceIWaitFor = source;
+            ASSERT_ZERO(pthread_mutex_unlock(&bufferMutex));
             fprintf(stderr, "MAIN %d: I hang myself, waiting for: S %d, C %d, T %d\n", WORLD_RANK, source, count, tag);
             ASSERT_SYS_OK(sem_wait(&mainThreadStopper));
 
@@ -576,6 +606,8 @@ MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
             found = justRecieved;
             justRecieved = NULL;
             ASSERT_NOT_NULL(found);
+        } else {
+            ASSERT_ZERO(pthread_mutex_unlock(&bufferMutex));
         }
         // Tutaj found ustawione na dobrą wiadomość, która odbieramy.
 
@@ -869,6 +901,7 @@ MIMPI_Retcode MIMPI_Reduce(void const *send_data, void *recv_data, int count, MI
             }
         }
     }
+    // TODO: Tutaj niektóre tablice do redukcji mogą nie istnieć
     int reduceRes = reduce(leftSonMess, rightSonMess, send_data, count, op);
     assert(reduceRes == 0);
     // After that the reduced message is in leftSonMess
