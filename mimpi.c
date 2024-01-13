@@ -575,6 +575,7 @@ MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
     } else if (source == WORLD_RANK) {
         return MIMPI_ERROR_ATTEMPTED_SELF_OP;
     }
+    
     // TODO: Try to put it under buffer searching
     if (DEADLOCK_DETECTION_ENABLED) {
         // fprintf(stderr, "MAIN %d: Deadlock block\n", WORLD_RANK);
