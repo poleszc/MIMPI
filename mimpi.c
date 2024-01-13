@@ -13,11 +13,6 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-#define CHUNK_SIZE 256
-
-int WORLD_SIZE;
-int WORLD_RANK;
-
 typedef struct initialDataChunk {
     int source;
     int count;
@@ -192,11 +187,16 @@ initialDataChunk *searchAndRemoveMessage(LinkedList *list, int tag, int count) {
 #define BARRIER_TAG -4
 #define BROADCAST_TAG -5
 #define REDUCE_TAG -6
+#define DEADLOCK_TAG -7
+
 #define WORLD_SIZE_ENV "MIMPI_WORLD_SIZE"
 #define WORLD_RANK_ENV "MIMPI_WORLD_RANK"
 #define CHANNEL_READ_ENV "MIMPI_CHANNEL_READ"
+#define CHUNK_SIZE 256
 
-bool DEADLOCK_DETECTION;
+bool DEADLOCK_DETECTION_ENABLED;
+int WORLD_SIZE;
+int WORLD_RANK;
 
 // Did i-th program end.
 bool PROGRAMS_ENDED[MAX_PROCESSES];
@@ -228,6 +228,12 @@ bool recieved = true;
 // Buffers for MIMPI_Send and MIMPI_Recv
 char helperChunk[CHUNK_SIZE];
 char sendChunk[CHUNK_SIZE];
+
+// Deadlock detection
+// Did i-th process invoke MIMPI_Recv on me.
+bool recvOnMe[MAX_PROCESSES];
+// To let the main thread now that deadlock was detected
+bool deadlockDetected = false;
 
 // Tree relations for logarythmic group functions
 // [i][0] -> i-th parent
@@ -401,10 +407,14 @@ void *helperThreadMain() {
 void MIMPI_Init(bool enable_deadlock_detection) {
     channels_init();
 
-    DEADLOCK_DETECTION = enable_deadlock_detection;
-    if (enable_deadlock_detection && WORLD_RANK == 0) {
-        //  TODO: trzeba stworzyc jakis dodatkowy proces ktory bedzie przyjmował
-        //  informacje o wysyłkach i przyjeciach i naklepac do tego jakis graf
+    DEADLOCK_DETECTION_ENABLED = enable_deadlock_detection;
+    if (enable_deadlock_detection) {
+        //  TODO: Deadlock
+        // Jeżeli wywołujemy MIMPI_Recv będąc procesem o mniejszym indeksie niż ten do którego wysyłamy
+        // To prosimy go o pozwolenie. Tj. wysyłamy mu wiadomość, że chcemy na niego wywołać recv. Jeżeli on ma zapisane
+        // w tablicy ze juz ma wywołane na nas recv to budzi swojego zeby sie wywalił oraz odsyła wiadomosc ze nie mozna
+        // i masz zwrocić bład. Jeżeli wiekszy nie wywołał recv na tamten to odsyła ze spoko i wtedy zaznacza sobie ze
+        // zostało na niego wywołąne recv wiec jak on teraz wywoła recv to wie ze ma sie wywalić.
     }
 
     // Inicjalizujemy World Size i World Rank i deskryptory do komunikacji z
@@ -493,10 +503,7 @@ int MIMPI_World_size() { return WORLD_SIZE; }
 int MIMPI_World_rank() { return WORLD_RANK; }
 
 MIMPI_Retcode MIMPI_Send(void const *data, int count, int destination, int tag) {
-    // TODO: MIMPI_DEADLOCK_DETECTED
-
     // fprintf(stderr, "MAIN %d: Entering MIMPI_Send D %d, C %d, T %d\n", WORLD_RANK, destination, count, tag);
-
     if (destination < 0 || destination > WORLD_SIZE - 1) {
         return MIMPI_ERROR_NO_SUCH_RANK;
     } else if (destination == WORLD_RANK &&
@@ -505,6 +512,11 @@ MIMPI_Retcode MIMPI_Send(void const *data, int count, int destination, int tag) 
     } else if (PROGRAMS_ENDED[destination]) {
         return MIMPI_ERROR_REMOTE_FINISHED;
     } else {
+
+        if (DEADLOCK_DETECTION_ENABLED) {
+            // TODO: Deadlock implementation.
+        }
+
         // fprintf(stderr, "MAIN %d: Initializing send to %d with count %d and tag %d, through %d\n", WORLD_RANK,
         // destination, count, tag, SEND_FDS[destination]);
 
@@ -550,6 +562,11 @@ MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
     } else if (source == WORLD_RANK) {
         return MIMPI_ERROR_ATTEMPTED_SELF_OP;
     }
+    if (DEADLOCK_DETECTION_ENABLED) {
+        //TODO: Deadlock implementation
+    }
+
+
     ASSERT_ZERO(pthread_mutex_lock(&bufferMutex));
     // printBufferDebug(messageBuffer);
     initialDataChunk *found = searchAndRemoveMessage(messageBuffer[source], tag, count);
