@@ -8,7 +8,6 @@
 
 #define MIN_PROCESSES 1
 #define MAX_PROCESSES 16
-#define STARTING_DESCRIPTOR_NUMBER 60
 #define MIN_USABLE_DESCRIPTOR_NUMBER 20
 #define MAX_USABLE_DESCRIPTOR_NUMBER 1023
 
@@ -28,7 +27,6 @@ int main(int argc, char *argv[]) {
         return -1;
     }
 
-    /// DESCRIPTORS ///
     // Chwilowo tworzymy deskryptory dopóki nie stworzymy wiekszego niz 19, zeby
     // nasze zaczynały się od 20
     int tempDescriptors[MIN_USABLE_DESCRIPTOR_NUMBER];
@@ -56,15 +54,6 @@ int main(int argc, char *argv[]) {
     for (int i = 0; i < numOfOpenDescriptors; i++) {
         ASSERT_SYS_OK(close(tempDescriptors[i]));
     }
-    /// DESCRIPTORS ///
-
-    // DEBUG
-     fprintf(stderr, "===========CHANNELS===========\n");
-     for (int i = 0; i < n; i++) {
-         fprintf(stderr, "{%d, %d} | ", channels[i][0], channels[i][1]);
-     }
-     fprintf(stderr, "\n=========================================\n");
-    // DEBUG
 
     // Ustawiamy zmienna środowiskowa oznaczjąca liczbę odpalonych równolegle
     // programów
@@ -80,11 +69,11 @@ int main(int argc, char *argv[]) {
         ASSERT_SYS_OK(pid = fork());
         if (pid == 0) { // Proces potomny
             // Ustawiamy zmienna oznaczająca indeks programu
-            char index_arg[3];
+            char index_arg[4];
             snprintf(index_arg, sizeof(index_arg), "%d", i);
             setenv(WORLD_RANK_ENV, index_arg, 1);
 
-            char readDesc[5];
+            char readDesc[4];
             snprintf(readDesc, sizeof(readDesc), "%d", channels[i][0]);
             setenv(CHANNEL_READ_ENV, readDesc, 1);
 
@@ -94,7 +83,7 @@ int main(int argc, char *argv[]) {
                 char writeDescEnv[32];
                 snprintf(writeDescEnv, sizeof(writeDescEnv), "MIMPI_CHANNEL_WRITE_%d", i);
                 // TODO: Make the buffer smaller
-                char writeDesc[8];
+                char writeDesc[4];
                 snprintf(writeDesc, sizeof(writeDesc), "%d", channels[i][1]);
                 setenv(writeDescEnv, writeDesc, 1);
             }
@@ -107,16 +96,12 @@ int main(int argc, char *argv[]) {
     for (int i = 0; i < n; ++i) {
         ASSERT_SYS_OK(wait(NULL));
     }
-    // fprintf(stderr, "Po wait\n");
 
     // Zamykamy używane deskryptory
     for (int i = 0; i < n; i++) {
         close(channels[i][0]);
         close(channels[i][1]);
     }
-
-    // TODO: ZAKONCZ DZIALANIE I ZWOLNIJ EWENTUALNIE UZYWANA PAMIEC
-    // TODO: Zamknij wszystki desktyptory?
 
     return 0;
 }
