@@ -83,14 +83,19 @@ int main(int argc, char *argv[]) {
             snprintf(readDesc, sizeof(readDesc), "%d", channels[i][0]);
             setenv(CHANNEL_READ_ENV, readDesc, 1);
 
-            // TODO: Close not used in process descriptors
+            // for (int j = 0; j < n; j++) {
+            //     if (i != j) {
+            //         fprintf(stderr, "Closing fd: %d\n", channels[j][0]);
+            //         ASSERT_SYS_OK(close(channels[j][0]));
+            //     }
+            // }
 
-            for (int i = 0; i < n; i++) {
+            for (int j = 0; j < n; j++) {
                 char writeDescEnv[32];
-                snprintf(writeDescEnv, sizeof(writeDescEnv), "MIMPI_CHANNEL_WRITE_%d", i);
-                // TODO: Make the buffer smaller
+                snprintf(writeDescEnv, sizeof(writeDescEnv), "MIMPI_CHANNEL_WRITE_%d", j);
+
                 char writeDesc[4];
-                snprintf(writeDesc, sizeof(writeDesc), "%d", channels[i][1]);
+                snprintf(writeDesc, sizeof(writeDesc), "%d", channels[j][1]);
                 setenv(writeDescEnv, writeDesc, 1);
             }
 
@@ -98,15 +103,15 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    // Czekanie na zakończenie wszystkich procesów potomnych
-    for (int i = 0; i < n; ++i) {
-        ASSERT_SYS_OK(wait(NULL));
-    }
-
     // Zamykamy używane deskryptory
     for (int i = 0; i < n; i++) {
         close(channels[i][0]);
         close(channels[i][1]);
+    }
+
+    // Czekanie na zakończenie wszystkich procesów potomnych
+    for (int i = 0; i < n; ++i) {
+        ASSERT_SYS_OK(wait(NULL));
     }
 
     return 0;
