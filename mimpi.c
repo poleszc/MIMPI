@@ -373,6 +373,10 @@ void *helperThreadMain() {
                     fprintf(stderr, "HELPER %d:  Second Deadlocked\n", WORLD_RANK);
                     secondDeadlocked = true;
                     deadlockDetected = true;
+                    sourceIWaitFor = NOWAIT_TAG;
+                    countIWaitFor = NOWAIT_TAG;
+                    tagIWaitFor = NOWAIT_TAG;
+                    fprintf(stderr, "HELPER %d:  Waking up main\n", WORLD_RANK);
                     ASSERT_ZERO(pthread_mutex_unlock(&bufferMutex));
                     ASSERT_SYS_OK(sem_post(&mainThreadStopper));
                     continue;
@@ -390,6 +394,9 @@ void *helperThreadMain() {
                     // We wake up the main thread and tell him to crash.
                     fprintf(stderr, "HELPER %d:  Waking up my main cause DEADLOCK occured\n", WORLD_RANK);
                     deadlockDetected = true;
+                    sourceIWaitFor = NOWAIT_TAG;
+                    countIWaitFor = NOWAIT_TAG;
+                    tagIWaitFor = NOWAIT_TAG;
                     ASSERT_ZERO(pthread_mutex_unlock(&bufferMutex));
                     ASSERT_SYS_OK(sem_post(&mainThreadStopper));
                 } else {
