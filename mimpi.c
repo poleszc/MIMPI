@@ -333,7 +333,7 @@ void *helperThreadMain() {
         assert(read == 256);
         fprintf(stderr, "HELPER %d:  Woke up from chrecv. Read %ld bytes\n", WORLD_RANK, read);
         if (DEADLOCK_DETECTION_ENABLED) {
-            ASSERT_ZERO(pthread_mutex_lock(&deadlockMutex));
+            ASSERT_ZERO(pthread_mutex_lock(&bufferMutex));
         }
 
         int source;
@@ -349,7 +349,7 @@ void *helperThreadMain() {
 
             if (tag == REMOTE_FINISHED) { // Process of id source just ended.
                 if (DEADLOCK_DETECTION_ENABLED) {
-                    ASSERT_ZERO(pthread_mutex_unlock(&deadlockMutex));
+                    ASSERT_ZERO(pthread_mutex_unlock(&bufferMutex));
                 }
                 fprintf(stderr, "HELPER %d:  Process %d just ended\n", WORLD_RANK, source);
                 PROGRAMS_ENDED[source] = true;
@@ -362,7 +362,7 @@ void *helperThreadMain() {
                 continue;
             } else if (tag == MAIN_THREAD_FINISHED) { // End request from parent.
                 fprintf(stderr, "HELPER %d:  Got ending message from parent\n", WORLD_RANK);
-                ASSERT_ZERO(pthread_mutex_unlock(&deadlockMutex));
+                ASSERT_ZERO(pthread_mutex_unlock(&bufferMutex));
                 break;
             } else if (DEADLOCK_DETECTION_ENABLED && tag == DEADLOCK_TAG) {
                 if (count == sizeof(char)) { // message letting us now that someone invoked recv on us
@@ -373,7 +373,7 @@ void *helperThreadMain() {
                     fprintf(stderr, "HELPER %d:  Second Deadlocked\n", WORLD_RANK);
                     secondDeadlocked = true;
                     deadlockDetected = true;
-                    ASSERT_ZERO(pthread_mutex_unlock(&deadlockMutex));
+                    ASSERT_ZERO(pthread_mutex_unlock(&bufferMutex));
                     ASSERT_SYS_OK(sem_post(&mainThreadStopper));
                     continue;
                 }
@@ -390,15 +390,15 @@ void *helperThreadMain() {
                     // We wake up the main thread and tell him to crash.
                     fprintf(stderr, "HELPER %d:  Waking up my main cause DEADLOCK occured\n", WORLD_RANK);
                     deadlockDetected = true;
-                    ASSERT_ZERO(pthread_mutex_unlock(&deadlockMutex));
+                    ASSERT_ZERO(pthread_mutex_unlock(&bufferMutex));
                     ASSERT_SYS_OK(sem_post(&mainThreadStopper));
                 } else {
-                    ASSERT_ZERO(pthread_mutex_unlock(&deadlockMutex));
+                    ASSERT_ZERO(pthread_mutex_unlock(&bufferMutex));
                 }
                 // Deadlock wasn't detected, we mark the source as deadlockable
                 continue;
             } else {
-                ASSERT_ZERO(pthread_mutex_unlock(&deadlockMutex));
+                ASSERT_ZERO(pthread_mutex_unlock(&bufferMutex));
             }
 
             bufferData = (initialDataChunk *)malloc(sizeof(initialDataChunk));
@@ -415,7 +415,7 @@ void *helperThreadMain() {
             MESSAGES_IN_BUILD[source] = bufferData;
         } else { // Not the first block, appending to message in build.
             if (DEADLOCK_DETECTION_ENABLED) {
-                ASSERT_ZERO(pthread_mutex_unlock(&deadlockMutex));
+                ASSERT_ZERO(pthread_mutex_unlock(&bufferMutex));
             }
             bufferData = MESSAGES_IN_BUILD[source];
             int copySize = bufferData->count - BYTES_READ_BY_NOW[bufferData->source] < CHUNK_SIZE - sizeof(int)
@@ -608,32 +608,31 @@ MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
         return MIMPI_ERROR_ATTEMPTED_SELF_OP;
     }
 
-
-
+    ASSERT_ZERO(pthread_mutex_lock(&bufferMutex));
+    initialDataChunk *found = searchAndRemoveMessage(messageBuffer[source], tag, count);
     // TODO: Try to put it under buffer searching
     if (DEADLOCK_DETECTION_ENABLED) {
-        ASSERT_ZERO(pthread_mutex_lock(&deadlockMutex));
         fprintf(stderr, "MAIN %d: Deadlock block\n", WORLD_RANK);
         if (WORLD_RANK < source) { // If we have a smaller index, then we ask for permission
             fprintf(stderr, "MAIN %d: Smaller index sending message to source\n", WORLD_RANK);
             // TODO: Deadlock implementation
-            ASSERT_ZERO(pthread_mutex_unlock(&deadlockMutex));
             char deadlockMessage = 1;
             // We send source a message to let him now that we invoked recv on him.
             int res = MIMPI_Send(&deadlockMessage, sizeof(char), source, DEADLOCK_TAG);
             if (res == MIMPI_ERROR_REMOTE_FINISHED) {
+                ASSERT_ZERO(pthread_mutex_unlock(&bufferMutex));
                 return MIMPI_ERROR_REMOTE_FINISHED;
             }
 
             // TODO: Przeplot, ze tutaj jeszcze nie zdaży się ustawic na co czekamy a wtedy drugi juz dostanie wiadomsoc
             // ze mozna
-        } else {
+        } else if (!found) {
             fprintf(stderr, "MAIN %d: Bigger index than source. Checking if he came\n", WORLD_RANK);
             if (recvOnMe[source] > 0) { // This process invoked recv on me. I need to crash, and let him now
                 recvOnMe[source]--;
                 printRecvOnMe();
-                ASSERT_ZERO(pthread_mutex_unlock(&deadlockMutex));
                 fprintf(stderr, "MAIN %d: source %d invoked recv on me\n", WORLD_RANK, source);
+                ASSERT_ZERO(pthread_mutex_unlock(&bufferMutex));
                 int deadlockMessage = 8054;
                 int res = MIMPI_Send(&deadlockMessage, sizeof(int), source, DEADLOCK_TAG);
                 if (res == MIMPI_ERROR_REMOTE_FINISHED) {
@@ -641,15 +640,10 @@ MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
                 }
                 fprintf(stderr, "MAIN %d: RETURNING DEADLOCK DETECTED\n", WORLD_RANK);
                 return MIMPI_ERROR_DEADLOCK_DETECTED;
-            } else {
-                ASSERT_ZERO(pthread_mutex_unlock(&deadlockMutex));
             }
         }
     }
     fprintf(stderr, "MAIN %d: Got through deadlock block\n", WORLD_RANK);
-
-    ASSERT_ZERO(pthread_mutex_lock(&bufferMutex));
-    initialDataChunk *found = searchAndRemoveMessage(messageBuffer[source], tag, count);
 
     // Debug
     // if (!found) {
@@ -737,6 +731,7 @@ MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
             //     recvOnMe[source]--;
             //     printRecvOnMe();
             // }
+            fprintf(stderr, "MAIN %d: Found message for me\n", WORLD_RANK);
             ASSERT_ZERO(pthread_mutex_unlock(&bufferMutex));
         }
         // Tutaj found ustawione na dobrą wiadomość, która odbieramy.
