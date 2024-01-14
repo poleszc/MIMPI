@@ -141,35 +141,23 @@ void deleteLinkedList(LinkedList *list) {
 // Finds and removes first message which matches the tag and count.
 // Returns NULL if no such message was found.
 initialDataChunk *searchAndRemoveMessage(LinkedList *list, int tag, int count) {
-    // fprintf(stderr, "MAIN %d: BUFFER IN SEARCH OF T %d, C %d\n", WORLD_RANK, tag, count);
     Node *curr = list->head;
 
     if (!list->head && !list->tail) { // Buffer is empty.
-        // fprintf(stderr, "MAIN %d: BUFFER EMPTY\n", WORLD_RANK);
         return NULL;
     }
     while (1) {
         if (!curr) { // curr is NULL, nothing was found
-            // fprintf(stderr, "MAIN %d: end of buffer, none was found\n", WORLD_RANK);
             return NULL;
         }
-        // fprintf(stderr, "MAIN %d: In while C %d, T %d, S %d\n", WORLD_RANK, curr->data->count, curr->data->tag,
-        // curr->data->source);
         if (tag == MIMPI_ANY_TAG && curr->data->count == count) {
-            // We found it
-            // fprintf(stderr, "MAIN %d: found with anytag\n", WORLD_RANK);
             break;
         }
         if (curr->data->tag == tag && curr->data->count == count) {
-            // We found it
-            // fprintf(stderr, "MAIN %d: found with specified\n", WORLD_RANK);
             break;
         }
         curr = curr->next;
     }
-
-    // fprintf(stderr, "MAIN %d: Message was found:  C %d, T %d, S %d\n", WORLD_RANK, curr->data->count,
-    // curr->data->tag, curr->data->source);
 
     initialDataChunk *data = curr->data;
     deleteNode(list, curr);
@@ -216,7 +204,6 @@ pthread_t helperThread;
 LinkedList *messageBuffer[MAX_PROCESSES];
 sem_t mainThreadStopper; // Zatrzymuje watek glowny jak nie ma wiadomosci
 pthread_mutex_t bufferMutex;
-pthread_mutex_t deadlockMutex;
 bool helperThreadActive = true;
 // For what message is the main thread waiting.
 int tagIWaitFor = NOWAIT_TAG;
@@ -260,12 +247,6 @@ void printBufferDebug(LinkedList *messageBuffer[MAX_PROCESSES]) {
         fprintf(stderr, "NULL\n");
     }
     fprintf(stderr, "==================================================\n");
-}
-
-void printRecvOnMe() {
-    fprintf(stderr, "%d: %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d\n", WORLD_RANK, recvOnMe[0],
-            recvOnMe[1], recvOnMe[2], recvOnMe[3], recvOnMe[4], recvOnMe[5], recvOnMe[6], recvOnMe[7], recvOnMe[8],
-            recvOnMe[9], recvOnMe[10], recvOnMe[11], recvOnMe[12], recvOnMe[13], recvOnMe[14], recvOnMe[15]);
 }
 
 int reduceTriple(uint8_t *left, uint8_t *right, const uint8_t *father, int count, MIMPI_Op op) {
@@ -323,27 +304,26 @@ int reduceDouble(uint8_t *left, const uint8_t *father, int count, MIMPI_Op op) {
 }
 
 void *helperThreadMain() {
-    fprintf(stderr, "HELPER %d:  Entered main\n", WORLD_RANK);
+    // fprintf(stderr, "HELPER %d:  Entered main\n", WORLD_RANK);
     while (helperThreadActive) {
-        fprintf(stderr, "HELPER %d:  Waiting on chrecv\n", WORLD_RANK);
+        // fprintf(stderr, "HELPER %d:  Waiting on chrecv\n", WORLD_RANK);
 
         // We always recieve 256 byte blocks, although they are not always filled with data
         ssize_t read = chrecv(READ_FD, helperChunk, CHUNK_SIZE);
         ASSERT_SYS_OK(read);
         assert(read == 256);
-        fprintf(stderr, "HELPER %d:  Woke up from chrecv. Read %ld bytes\n", WORLD_RANK, read);
+        // fprintf(stderr, "HELPER %d:  Woke up from chrecv. Read %ld bytes\n", WORLD_RANK, read);
+
         if (DEADLOCK_DETECTION_ENABLED) {
             ASSERT_ZERO(pthread_mutex_lock(&bufferMutex));
         }
 
         int source;
         memcpy(&source, helperChunk, sizeof(int));
-        fprintf(stderr, "HELPER %d:  Read message from %d\n", WORLD_RANK, source);
+        // fprintf(stderr, "HELPER %d:  Read message from %d\n", WORLD_RANK, source);
 
         initialDataChunk *bufferData = NULL;
-        if (MESSAGES_IN_BUILD[source] == NULL) { // wiadomość incjalizujaca blok, wiemy ze jest tam count i
-                                                 // tu alokujemy pamiec
-            // fprintf(stderr, "HELPER %d:  That was a first message\n", WORLD_RANK);
+        if (MESSAGES_IN_BUILD[source] == NULL) { // Block initializing message. New message from source.
             int count = *(int *)(helperChunk + sizeof(int));
             int tag = *(int *)(helperChunk + 2 * sizeof(int));
 
@@ -351,32 +331,32 @@ void *helperThreadMain() {
                 if (DEADLOCK_DETECTION_ENABLED) {
                     ASSERT_ZERO(pthread_mutex_unlock(&bufferMutex));
                 }
-                fprintf(stderr, "HELPER %d:  Process %d just ended\n", WORLD_RANK, source);
+                // fprintf(stderr, "HELPER %d:  Process %d just ended\n", WORLD_RANK, source);
                 PROGRAMS_ENDED[source] = true;
                 // If main was waiting for the process that just ended, we wake him up and tell him to crash.
                 if (sourceIWaitFor == source) {
-                    fprintf(stderr, "HELPER %d: Main waited for message from %d\n", WORLD_RANK, source);
+                    // fprintf(stderr, "HELPER %d: Main waited for message from %d\n", WORLD_RANK, source);
                     remoteMainWaitedForEnded = true;
                     ASSERT_SYS_OK(sem_post(&mainThreadStopper));
                 }
                 continue;
             } else if (tag == MAIN_THREAD_FINISHED) { // End request from parent.
-                fprintf(stderr, "HELPER %d:  Got ending message from parent\n", WORLD_RANK);
-                ASSERT_ZERO(pthread_mutex_unlock(&bufferMutex));
+                // fprintf(stderr, "HELPER %d:  Got ending message from parent\n", WORLD_RANK);
+                if (DEADLOCK_DETECTION_ENABLED) {
+                    ASSERT_ZERO(pthread_mutex_unlock(&bufferMutex));
+                }
                 break;
             } else if (DEADLOCK_DETECTION_ENABLED && tag == DEADLOCK_TAG) {
-                if (count == sizeof(char)) { // message letting us now that someone invoked recv on us
+                if (count == sizeof(char)) { // Someone invoked recv on us.
                     recvOnMe[source]++;
-                    printRecvOnMe();
-                    fprintf(stderr, "HELPER %d:  Recieved a DEADLOCK message\n", WORLD_RANK);
-                } else if (count == sizeof(int)) { // message leeting us now that a deadlock occured
-                    fprintf(stderr, "HELPER %d:  Second Deadlocked\n", WORLD_RANK);
+                } else if (count == sizeof(int)) { // Deadlock occured.
+                    // fprintf(stderr, "HELPER %d:  Second Deadlocked\n", WORLD_RANK);
                     secondDeadlocked = true;
                     deadlockDetected = true;
                     sourceIWaitFor = NOWAIT_TAG;
                     countIWaitFor = NOWAIT_TAG;
                     tagIWaitFor = NOWAIT_TAG;
-                    fprintf(stderr, "HELPER %d:  Waking up main\n", WORLD_RANK);
+                    // fprintf(stderr, "HELPER %d:  Waking up main\n", WORLD_RANK);
                     ASSERT_ZERO(pthread_mutex_unlock(&bufferMutex));
                     ASSERT_SYS_OK(sem_post(&mainThreadStopper));
                     continue;
@@ -384,15 +364,8 @@ void *helperThreadMain() {
 
                 // this process is already waiting for the one that wants to wait for him/
                 if (recvOnMe[source] > 0 && sourceIWaitFor == source) {
-                    // TODO: Czy dodatkowo nie ma wiadomosci na ktora czekamy w buforze
-                    fprintf(stderr, "HELPER %d:  Our main waits for that source DEADLOCK\n", WORLD_RANK);
-                    // We let the process now that a deadlock occured so it crashes. Then we crash as well :).
-                    // TODO: Try to remove that.
-                    // if (res == MIMPI_ERROR_REMOTE_FINISHED) { // I guess that shouldnt occure
-                    //     return MIMPI_ERROR_REMOTE_FINISHED;
-                    // }
                     // We wake up the main thread and tell him to crash.
-                    fprintf(stderr, "HELPER %d:  Waking up my main cause DEADLOCK occured\n", WORLD_RANK);
+                    // fprintf(stderr, "HELPER %d:  Waking up my main cause DEADLOCK occured\n", WORLD_RANK);
                     deadlockDetected = true;
                     sourceIWaitFor = NOWAIT_TAG;
                     countIWaitFor = NOWAIT_TAG;
@@ -405,7 +378,9 @@ void *helperThreadMain() {
                 // Deadlock wasn't detected, we mark the source as deadlockable
                 continue;
             } else {
-                ASSERT_ZERO(pthread_mutex_unlock(&bufferMutex));
+                if (DEADLOCK_DETECTION_ENABLED) {
+                    ASSERT_ZERO(pthread_mutex_unlock(&bufferMutex));
+                }
             }
 
             bufferData = (initialDataChunk *)malloc(sizeof(initialDataChunk));
@@ -436,12 +411,9 @@ void *helperThreadMain() {
         // We built the whole message, now we have to send it to main.
         if (BYTES_READ_BY_NOW[source] == MESSAGES_IN_BUILD[source]->count) {
             // Main was waiting for that exact message
-            // if (DEADLOCK_DETECTION_ENABLED) {
-            //     recvOnMe[source]--;
-            // } // TODO: wrzuc to w else
             if (recieved && countIWaitFor == bufferData->count && sourceIWaitFor == bufferData->source &&
                 (tagIWaitFor == bufferData->tag || (tagIWaitFor == MIMPI_ANY_TAG && bufferData->tag >= 0))) {
-                fprintf(stderr, "HELPER %d: Someone was waiting for that exact message\n", WORLD_RANK);
+                // fprintf(stderr, "HELPER %d: Someone was waiting for that exact message\n", WORLD_RANK);
                 recieved = false;
                 justRecieved = bufferData;
                 MESSAGES_IN_BUILD[source] = NULL;
@@ -449,15 +421,14 @@ void *helperThreadMain() {
                 sourceIWaitFor = NOWAIT_TAG;
                 ASSERT_SYS_OK(sem_post(&mainThreadStopper));
             } else { // Main didn't wait for that message, adding to buffer
-                fprintf(stderr, "HELPER %d: No one is waiting, appending to buffer\n", WORLD_RANK);
+                // fprintf(stderr, "HELPER %d: No one is waiting, appending to buffer\n", WORLD_RANK);
                 append(messageBuffer[source], bufferData);
                 MESSAGES_IN_BUILD[source] = NULL;
                 BYTES_READ_BY_NOW[source] = -1;
-                // printBufferDebug(messageBuffer);
             }
         }
     }
-    fprintf(stderr, "HELPER %d: I die :(\n", WORLD_RANK);
+    // fprintf(stderr, "HELPER %d: I die :(\n", WORLD_RANK);
     return NULL;
 }
 
@@ -483,7 +454,7 @@ void MIMPI_Init(bool enable_deadlock_detection) {
     ASSERT_ZERO(unsetenv(WORLD_RANK_ENV));
     ASSERT_ZERO(unsetenv(CHANNEL_READ_ENV));
 
-    fprintf(stderr, "MAIN %d: Entered Init\n", WORLD_RANK);
+    // fprintf(stderr, "MAIN %d: Entered Init\n", WORLD_RANK);
 
     // Inicjalizujemy tablice deskryptorów do komunikacji send/recv z
     // programami.
@@ -509,20 +480,15 @@ void MIMPI_Init(bool enable_deadlock_detection) {
 
     // fprintf(stderr, "MAIN %d: Finished initializing, starting helper\n", WORLD_RANK);
     ASSERT_ZERO(pthread_mutex_init(&bufferMutex, NULL));
-    if (DEADLOCK_DETECTION_ENABLED) {
-        ASSERT_ZERO(pthread_mutex_init(&deadlockMutex, NULL));
-    }
     ASSERT_SYS_OK(sem_init(&mainThreadStopper, 0, 0));
     ASSERT_ZERO(pthread_create(&helperThread, NULL, helperThreadMain, NULL));
 }
 
 void MIMPI_Finalize() {
-    fprintf(stderr, "MAIN %d: Entered finalize\n", WORLD_RANK);
+    // fprintf(stderr, "MAIN %d: Entered finalize\n", WORLD_RANK);
     int endMess = __INT_MAX__;
     for (int i = 0; i < WORLD_SIZE; i++) {
         if (i != WORLD_RANK && !PROGRAMS_ENDED[i]) {
-            // fprintf(stderr, "MAIN %d: Sending end message to %d\n", WORLD_RANK, i);
-
             int res = MIMPI_Send(&endMess, sizeof(endMess), i, REMOTE_FINISHED);
             if (res != MIMPI_SUCCESS) {
                 fprintf(stderr, "MAIN %d: MIMPI_SEND FAILED: %d\n", WORLD_RANK, res);
@@ -530,7 +496,6 @@ void MIMPI_Finalize() {
         }
     }
     // Sending message to ourself to stop helper.
-    // fprintf(stderr, "MAIN %d: Sending end message to our helper\n", WORLD_RANK);
     int res = MIMPI_Send(&endMess, sizeof(endMess), WORLD_RANK, MAIN_THREAD_FINISHED);
     if (res != MIMPI_SUCCESS) {
         fprintf(stderr, "MAIN %d: MIMPI_SEND FAILED\n", WORLD_RANK);
@@ -539,9 +504,6 @@ void MIMPI_Finalize() {
     ASSERT_ZERO(pthread_join(helperThread, NULL));
     ASSERT_SYS_OK(sem_destroy(&mainThreadStopper));
     ASSERT_ZERO(pthread_mutex_destroy(&bufferMutex));
-    if (DEADLOCK_DETECTION_ENABLED) {
-        ASSERT_ZERO(pthread_mutex_destroy(&deadlockMutex));
-    }
 
     // Niszczymy bufor na senda.
     for (int i = 0; i < WORLD_SIZE; i++) {
@@ -551,7 +513,7 @@ void MIMPI_Finalize() {
     // TODO: close my desctiptors
 
     channels_finalize();
-    fprintf(stderr, "MAIN %d: Exiting finalize\n", WORLD_RANK);
+    // fprintf(stderr, "MAIN %d: Exiting finalize\n", WORLD_RANK);
 }
 
 int MIMPI_World_size() { return WORLD_SIZE; }
@@ -559,7 +521,7 @@ int MIMPI_World_size() { return WORLD_SIZE; }
 int MIMPI_World_rank() { return WORLD_RANK; }
 
 MIMPI_Retcode MIMPI_Send(void const *data, int count, int destination, int tag) {
-    fprintf(stderr, "MAIN %d: Entering MIMPI_Send D %d, C %d, T %d\n", WORLD_RANK, destination, count, tag);
+    // fprintf(stderr, "MAIN %d: Entering MIMPI_Send D %d, C %d, T %d\n", WORLD_RANK, destination, count, tag);
     if (destination < 0 || destination > WORLD_SIZE - 1) {
         return MIMPI_ERROR_NO_SUCH_RANK;
     } else if (destination == WORLD_RANK &&
@@ -604,11 +566,8 @@ MIMPI_Retcode MIMPI_Send(void const *data, int count, int destination, int tag) 
 }
 
 MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
+    // fprintf(stderr, "MAIN %d: Entered MIMPI_Recv: S %d, C %d, T %d\n", WORLD_RANK, source, count, tag);
     remoteMainWaitedForEnded = false;
-    fprintf(stderr, "MAIN %d: Entered MIMPI_Recv: S %d, C %d, T %d\n", WORLD_RANK, source, count, tag);
-    // printRecvOnMe();
-    // displayList(messageBuffer[source]);
-
     if (source < 0 || source > WORLD_SIZE - 1) {
         return MIMPI_ERROR_NO_SUCH_RANK;
     } else if (source == WORLD_RANK) {
@@ -617,12 +576,10 @@ MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
 
     ASSERT_ZERO(pthread_mutex_lock(&bufferMutex));
     initialDataChunk *found = searchAndRemoveMessage(messageBuffer[source], tag, count);
-    // TODO: Try to put it under buffer searching
     if (DEADLOCK_DETECTION_ENABLED) {
-        fprintf(stderr, "MAIN %d: Deadlock block\n", WORLD_RANK);
+        // fprintf(stderr, "MAIN %d: Deadlock block\n", WORLD_RANK);
         if (WORLD_RANK < source) { // If we have a smaller index, then we ask for permission
-            fprintf(stderr, "MAIN %d: Smaller index sending message to source\n", WORLD_RANK);
-            // TODO: Deadlock implementation
+            // fprintf(stderr, "MAIN %d: Smaller index sending message to source\n", WORLD_RANK);
             char deadlockMessage = 1;
             // We send source a message to let him now that we invoked recv on him.
             int res = MIMPI_Send(&deadlockMessage, sizeof(char), source, DEADLOCK_TAG);
@@ -630,42 +587,28 @@ MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
                 ASSERT_ZERO(pthread_mutex_unlock(&bufferMutex));
                 return MIMPI_ERROR_REMOTE_FINISHED;
             }
-
-            // TODO: Przeplot, ze tutaj jeszcze nie zdaży się ustawic na co czekamy a wtedy drugi juz dostanie wiadomsoc
-            // ze mozna
         } else if (!found) {
-            fprintf(stderr, "MAIN %d: Bigger index than source. Checking if he came\n", WORLD_RANK);
+            // fprintf(stderr, "MAIN %d: Bigger index than source. Checking if he came\n", WORLD_RANK);
             if (recvOnMe[source] > 0) { // This process invoked recv on me. I need to crash, and let him now
                 recvOnMe[source]--;
-                printRecvOnMe();
-                fprintf(stderr, "MAIN %d: source %d invoked recv on me\n", WORLD_RANK, source);
+                // fprintf(stderr, "MAIN %d: source %d invoked recv on me\n", WORLD_RANK, source);
                 ASSERT_ZERO(pthread_mutex_unlock(&bufferMutex));
                 int deadlockMessage = 8054;
                 int res = MIMPI_Send(&deadlockMessage, sizeof(int), source, DEADLOCK_TAG);
                 if (res == MIMPI_ERROR_REMOTE_FINISHED) {
                     return MIMPI_ERROR_REMOTE_FINISHED;
                 }
-                fprintf(stderr, "MAIN %d: RETURNING DEADLOCK DETECTED\n", WORLD_RANK);
                 return MIMPI_ERROR_DEADLOCK_DETECTED;
             }
         }
     }
-    fprintf(stderr, "MAIN %d: Got through deadlock block\n", WORLD_RANK);
-
-    // Debug
-    // if (!found) {
-    // fprintf(stderr, "MAIN %d: Didn't find a message from source %d\n", WORLD_RANK, source);
-    // } else {
-    // fprintf(stderr, "MAIN %d: Found a message from source %d\n", WORLD_RANK, source);
-    // }
+    // fprintf(stderr, "MAIN %d: Got through deadlock block\n", WORLD_RANK);
 
     if (!found && PROGRAMS_ENDED[source]) {
         // fprintf(stderr, "MAIN %d: Source ended\n", WORLD_RANK);
         ASSERT_ZERO(pthread_mutex_unlock(&bufferMutex));
         return MIMPI_ERROR_REMOTE_FINISHED;
     } else {
-        // fprintf(stderr, "MAIN %d: Everything okay with the message, recieving\n", WORLD_RANK);
-
         if (!found) { // Jeszcze nie ma wiadomości dla nas, czekamy.
             // fprintf(stderr, "MAIN %d: No message was found\n", WORLD_RANK);
 
@@ -682,10 +625,11 @@ MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
             countIWaitFor = count;
             sourceIWaitFor = source;
             ASSERT_ZERO(pthread_mutex_unlock(&bufferMutex));
-            fprintf(stderr, "MAIN %d: I hang myself, waiting for: S %d, C %d, T %d\n", WORLD_RANK, source, count, tag);
+            // fprintf(stderr, "MAIN %d: I hang myself, waiting for: S %d, C %d, T %d\n", WORLD_RANK, source, count,
+            // tag);
             ASSERT_SYS_OK(sem_wait(&mainThreadStopper));
 
-            fprintf(stderr, "MAIN %d: Woke up from hanging\n", WORLD_RANK);
+            // fprintf(stderr, "MAIN %d: Woke up from hanging\n", WORLD_RANK);
 
             sourceIWaitFor = NOWAIT_TAG;
             tagIWaitFor = NOWAIT_TAG;
@@ -694,29 +638,29 @@ MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
             if (recieved && DEADLOCK_DETECTION_ENABLED &&
                 deadlockDetected) { // We woke up because a deadlock was detected
                 // We let the other procces know if it has a smaller index.
-                fprintf(stderr, "MAIN %d:  Woke up beacuse of deadlock\n", WORLD_RANK);
+                // fprintf(stderr, "MAIN %d:  Woke up beacuse of deadlock\n", WORLD_RANK);
                 deadlockDetected = false;
                 recvOnMe[source]--; // TODO: That may be a farmazon.
-                printRecvOnMe();
+                // printRecvOnMe();
                 // if (source <  WORLD_RANK) { // If we were bigger of the two
                 if (!secondDeadlocked) { // So we wake up the partner only once
                     int tempMessage = -2;
-                    fprintf(stderr, "MAIN %d:  Let now source %d that deadlock occured\n", WORLD_RANK, source);
+                    // fprintf(stderr, "MAIN %d:  Let now source %d that deadlock occured\n", WORLD_RANK, source);
                     int res = MIMPI_Send(&tempMessage, sizeof(int), source, DEADLOCK_TAG);
                     ASSERT_ZERO(res);
                 } else {
-                    fprintf(stderr, "MAIN %d:  Im the second deadlocked\n", WORLD_RANK);
+                    // fprintf(stderr, "MAIN %d:  Im the second deadlocked\n", WORLD_RANK);
                     secondDeadlocked = false;
                 }
 
-                fprintf(stderr, "MAIN %d:  DEADLOCK CRASH\n", WORLD_RANK);
+                // fprintf(stderr, "MAIN %d:  DEADLOCK CRASH\n", WORLD_RANK);
                 return MIMPI_ERROR_DEADLOCK_DETECTED;
             } else if (remoteMainWaitedForEnded &&
                        recieved) { // Source zakończył się w trakcie naszego czekania na niego.
                 // fprintf(stderr, "MAIN %d: Remote ended during our wating\n", WORLD_RANK);
                 if (DEADLOCK_DETECTION_ENABLED) {
                     recvOnMe[source]--; // TODO: ptentially buggable
-                    printRecvOnMe();
+                    // printRecvOnMe();
                 }
                 return MIMPI_ERROR_REMOTE_FINISHED;
             }
@@ -734,24 +678,18 @@ MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
             justRecieved = NULL;
             ASSERT_NOT_NULL(found);
         } else {
-            // if (DEADLOCK_DETECTION_ENABLED && source < WORLD_RANK) {
-            //     recvOnMe[source]--;
-            //     printRecvOnMe();
-            // }
-            fprintf(stderr, "MAIN %d: Found message for me\n", WORLD_RANK);
             ASSERT_ZERO(pthread_mutex_unlock(&bufferMutex));
         }
         // Tutaj found ustawione na dobrą wiadomość, która odbieramy.
         if (DEADLOCK_DETECTION_ENABLED && source < WORLD_RANK) {
             recvOnMe[source]--;
-            printRecvOnMe();
         }
 
         // fprintf(stderr, "MAIN %d: Actually copying memory to target ptr\n", WORLD_RANK);
         memcpy(data, found->data, found->count);
 
         free(found);
-        fprintf(stderr, "MAIN %d: Leaving recv\n", WORLD_RANK);
+        // fprintf(stderr, "MAIN %d: Leaving recv\n", WORLD_RANK);
         return MIMPI_SUCCESS;
     }
 }
