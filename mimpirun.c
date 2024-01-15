@@ -49,8 +49,8 @@ int main(int argc, char *argv[]) {
     }
 
     // Zamykamy tymczasowe deskryptory
-    close(mockDesc[0]);
-    close(mockDesc[1]);
+    ASSERT_SYS_OK(close(mockDesc[0]));
+    ASSERT_SYS_OK(close(mockDesc[1]));
     for (int i = 0; i < numOfOpenDescriptors; i++) {
         ASSERT_SYS_OK(close(tempDescriptors[i]));
     }
@@ -59,7 +59,7 @@ int main(int argc, char *argv[]) {
     // programów
     char size_arg[3];
     snprintf(size_arg, sizeof(size_arg), "%d", n);
-    setenv(WORLD_SIZE_ENV, size_arg, 1);
+    ASSERT_SYS_OK(setenv(WORLD_SIZE_ENV, size_arg, 1));
 
     char *prog = argv[2];         // nazwa prog
     char **args = &argv[2];       // dodatkowe argumenty do prog
@@ -71,11 +71,11 @@ int main(int argc, char *argv[]) {
             // Ustawiamy zmienna oznaczająca indeks programu
             char index_arg[4];
             snprintf(index_arg, sizeof(index_arg), "%d", i);
-            setenv(WORLD_RANK_ENV, index_arg, 1);
+            ASSERT_SYS_OK(setenv(WORLD_RANK_ENV, index_arg, 1));
 
             char readDesc[4];
             snprintf(readDesc, sizeof(readDesc), "%d", channels[i][0]);
-            setenv(CHANNEL_READ_ENV, readDesc, 1);
+            ASSERT_SYS_OK(setenv(CHANNEL_READ_ENV, readDesc, 1));
 
             for (int j = 0; j < n; j++) {
                 char writeDescEnv[32];
@@ -83,7 +83,7 @@ int main(int argc, char *argv[]) {
 
                 char writeDesc[4];
                 snprintf(writeDesc, sizeof(writeDesc), "%d", channels[j][1]);
-                setenv(writeDescEnv, writeDesc, 1);
+                ASSERT_SYS_OK(setenv(writeDescEnv, writeDesc, 1));
             }
 
             for (int j = 0; j < n; j++) {
@@ -92,7 +92,7 @@ int main(int argc, char *argv[]) {
 
                 char readDesc[4];
                 snprintf(readDesc, sizeof(readDesc), "%d", channels[j][0]);
-                setenv(readDescEnv, readDesc, 1);
+                ASSERT_SYS_OK(setenv(readDescEnv, readDesc, 1));
             }
 
             ASSERT_SYS_OK(execvp(prog, args));

@@ -171,7 +171,7 @@ initialDataChunk *searchAndRemoveMessage(LinkedList *list, int tag, int count) {
 #define WORLD_SIZE_ENV "MIMPI_WORLD_SIZE"
 #define WORLD_RANK_ENV "MIMPI_WORLD_RANK"
 #define CHANNEL_READ_ENV "MIMPI_CHANNEL_READ"
-#define CHUNK_SIZE 256
+#define CHUNK_SIZE 512
 
 bool DEADLOCK_DETECTION_ENABLED;
 int WORLD_SIZE;
@@ -290,7 +290,6 @@ int reduceDouble(uint8_t *left, const uint8_t *father, int count, MIMPI_Op op) {
 
 void *helperThreadMain() {
     while (helperThreadActive) {
-
         // We always recieve 256 byte blocks, although they are not always filled with data
         int actuallyRead = 0;
         while (actuallyRead < CHUNK_SIZE) {
@@ -305,7 +304,6 @@ void *helperThreadMain() {
 
         int source;
         memcpy(&source, helperChunk, sizeof(int));
-
         initialDataChunk *bufferData = NULL;
         if (MESSAGES_IN_BUILD[source] == NULL) { // Block initializing message. New message from source.
             int count = *(int *)(helperChunk + sizeof(int));
@@ -483,18 +481,12 @@ void MIMPI_Finalize() {
     int endMess = __INT_MAX__;
     for (int i = 0; i < WORLD_SIZE; i++) {
         if (i != WORLD_RANK && !PROGRAMS_ENDED[i]) {
-            int res = MIMPI_Send(&endMess, sizeof(int), i, REMOTE_FINISHED);
-            if (res != MIMPI_SUCCESS) {
-                fprintf(stderr, "MAIN %d: MIMPI_SEND FAILED: %d\n", WORLD_RANK, res);
-            }
+            MIMPI_Send(&endMess, sizeof(int), i, REMOTE_FINISHED);
         }
     }
 
     // Sending message to ourself to stop helper.
-    int res = MIMPI_Send(&endMess, sizeof(int), WORLD_RANK, MAIN_THREAD_FINISHED);
-    if (res != MIMPI_SUCCESS) {
-        fprintf(stderr, "MAIN %d: MIMPI_SEND FAILED\n", WORLD_RANK);
-    }
+    MIMPI_Send(&endMess, sizeof(int), WORLD_RANK, MAIN_THREAD_FINISHED);
 
     ASSERT_ZERO(pthread_join(helperThread, NULL));
     ASSERT_SYS_OK(sem_destroy(&mainThreadStopper));
@@ -753,7 +745,6 @@ MIMPI_Retcode MIMPI_Barrier() {
             }
         }
     }
-    fprintf(stderr, "MAIN %d: Walks out of MIMPI_Barrier\n", WORLD_RANK);
     return MIMPI_SUCCESS;
 }
 
