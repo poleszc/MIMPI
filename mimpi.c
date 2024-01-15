@@ -20,19 +20,6 @@ typedef struct initialDataChunk {
     char *data;
 } initialDataChunk;
 
-void printMemory(void *ptr, size_t numBytes) {
-    fprintf(stderr, "PRINT MEMORY\n");
-    unsigned char *bytePtr = (unsigned char *)ptr;
-
-    for (size_t i = 0; i < numBytes; i++) {
-        if (i % 32 == 0) {
-            fprintf(stderr, "\n");
-        }
-        fprintf(stderr, "%02hhX ", bytePtr[i]);
-    }
-    fprintf(stderr, "\n");
-}
-
 /// DOUBLY LINKED LIST IMPLEMENTATION ///
 // Struktura węzła listy
 typedef struct Node {
@@ -51,6 +38,7 @@ typedef struct LinkedList {
 LinkedList *createLinkedList() {
     LinkedList *list = (LinkedList *)malloc(sizeof(LinkedList));
     ASSERT_NOT_NULL(list);
+    memset(list, 0, sizeof(LinkedList));
     list->head = NULL;
     list->tail = NULL;
     return list;
@@ -60,6 +48,7 @@ LinkedList *createLinkedList() {
 void append(LinkedList *list, initialDataChunk *data) {
     Node *newNode = (Node *)malloc(sizeof(Node));
     ASSERT_NOT_NULL(newNode);
+    memset(newNode, 0, sizeof(Node));
     newNode->data = data;
     newNode->prev = NULL;
     newNode->next = NULL;
@@ -100,6 +89,7 @@ void insertAfterNode(LinkedList *list, Node *prevNode, initialDataChunk *data) {
 
     Node *newNode = (Node *)malloc(sizeof(Node));
     ASSERT_NOT_NULL(newNode);
+    memset(newNode, 0, sizeof(Node));
     newNode->data = data;
 
     if (prevNode->next != NULL) {
@@ -130,6 +120,7 @@ void deleteLinkedList(LinkedList *list) {
 
     while (current != NULL) {
         next = current->next;
+        free(current->data->data);
         free(current->data);
         free(current);
         current = next;
@@ -190,6 +181,7 @@ int WORLD_RANK;
 bool PROGRAMS_ENDED[MAX_PROCESSES];
 // FD for writing to i-th program.
 int SEND_FDS[MAX_PROCESSES];
+int READ_FDS[MAX_PROCESSES];
 // FD for reading messages to ME.
 int READ_FD;
 // Messages being recieved from channel + their size/tag
@@ -220,6 +212,8 @@ int recvOnMe[MAX_PROCESSES];
 // To let the main thread now that deadlock was detected
 bool deadlockDetected = false;
 bool secondDeadlocked = false;
+char sendChunk[CHUNK_SIZE];
+char helperChunk[CHUNK_SIZE];
 
 // Tree relations for logarythmic group functions
 // [i][0] -> i-th parent
@@ -302,13 +296,10 @@ int reduceDouble(uint8_t *left, const uint8_t *father, int count, MIMPI_Op op) {
 
 void *helperThreadMain() {
     // fprintf(stderr, "HELPER %d:  Entered main\n", WORLD_RANK);
-    void* helperChunk = malloc(CHUNK_SIZE);
     while (helperThreadActive) {
         // fprintf(stderr, "HELPER %d:  Waiting on chrecv\n", WORLD_RANK);
 
         // We always recieve 256 byte blocks, although they are not always filled with data
-        memset(helperChunk, 0, CHUNK_SIZE);
-
         ssize_t read = chrecv(READ_FD, helperChunk, CHUNK_SIZE);
         ASSERT_SYS_OK(read);
         assert(read == 256);
@@ -345,7 +336,6 @@ void *helperThreadMain() {
                 if (DEADLOCK_DETECTION_ENABLED) {
                     ASSERT_ZERO(pthread_mutex_unlock(&bufferMutex));
                 }
-                free(helperChunk);
                 break;
             } else if (DEADLOCK_DETECTION_ENABLED && tag == DEADLOCK_TAG) {
                 if (count == sizeof(char)) { // Someone invoked recv on us.
@@ -385,11 +375,16 @@ void *helperThreadMain() {
             }
 
             bufferData = (initialDataChunk *)malloc(sizeof(initialDataChunk));
+            ASSERT_NOT_NULL(bufferData);
+            memset(bufferData, 0, sizeof(initialDataChunk));
+
             bufferData->source = source;
             bufferData->count = count;
             bufferData->tag = tag;
             bufferData->data = malloc(bufferData->count);
             ASSERT_NOT_NULL(bufferData->data);
+            memset(bufferData->data, 0, bufferData->count);
+            // fprintf(stderr, "HELPER %d: Alloced buff: S %d, C%d, T %d\n", WORLD_RANK, bufferData->source, bufferData->count, bufferData->tag);
 
             int copySize = count < CHUNK_SIZE - 3 * sizeof(int) ? count : CHUNK_SIZE - 3 * sizeof(int);
             memcpy(bufferData->data, helperChunk + 3 * sizeof(int), copySize);
@@ -470,6 +465,25 @@ void MIMPI_Init(bool enable_deadlock_detection) {
         unsetenv(writeDescEnv);
     }
 
+    for (int i = 0; i < WORLD_SIZE; i++) {
+        if (i != WORLD_RANK) {
+            char readDescEnv[32];
+            snprintf(readDescEnv, sizeof(readDescEnv), "MIMPI_CHANNEL_READ_%d", i);
+
+            const char *readFd = getenv(readDescEnv);
+            ASSERT_NOT_NULL(readFd);
+
+            READ_FDS[i] = atoi(readFd);
+            unsetenv(readDescEnv);
+        }
+    }
+    memset(recvOnMe, 0, sizeof(recvOnMe));
+    memset(messageBuffer, 0, sizeof(messageBuffer));
+    memset(BYTES_READ_BY_NOW, 0, sizeof(BYTES_READ_BY_NOW));
+    memset(recvOnMe, 0, sizeof(recvOnMe));
+    memset(sendChunk, 0, CHUNK_SIZE);
+    memset(helperChunk, 0, CHUNK_SIZE);
+
     // Initializing global arrays and buffer.
     for (int i = 0; i < WORLD_SIZE; i++) {
         messageBuffer[i] = createLinkedList();
@@ -487,17 +501,21 @@ void MIMPI_Init(bool enable_deadlock_detection) {
 
 void MIMPI_Finalize() {
     // fprintf(stderr, "MAIN %d: Entered finalize\n", WORLD_RANK);
+    // int endMess = __INT_MAX__;
+    // int * = malloc(sizeof(int));
+    // ASSERT_NOT_NULL(endMess);
     int endMess = __INT_MAX__;
+
     for (int i = 0; i < WORLD_SIZE; i++) {
         if (i != WORLD_RANK && !PROGRAMS_ENDED[i]) {
-            int res = MIMPI_Send(&endMess, sizeof(endMess), i, REMOTE_FINISHED);
+            int res = MIMPI_Send(&endMess, sizeof(int), i, REMOTE_FINISHED);
             if (res != MIMPI_SUCCESS) {
                 fprintf(stderr, "MAIN %d: MIMPI_SEND FAILED: %d\n", WORLD_RANK, res);
             }
         }
     }
     // Sending message to ourself to stop helper.
-    int res = MIMPI_Send(&endMess, sizeof(endMess), WORLD_RANK, MAIN_THREAD_FINISHED);
+    int res = MIMPI_Send(&endMess, sizeof(int), WORLD_RANK, MAIN_THREAD_FINISHED);
     if (res != MIMPI_SUCCESS) {
         fprintf(stderr, "MAIN %d: MIMPI_SEND FAILED\n", WORLD_RANK);
     }
@@ -511,10 +529,15 @@ void MIMPI_Finalize() {
         deleteLinkedList(messageBuffer[i]);
     }
 
-    // TODO: close my desctiptors
+    for (int i = 0; i < WORLD_SIZE; i++) {
+        close(SEND_FDS[i]);
+        if (i != WORLD_RANK) {
+            close(READ_FDS[i]);
+        }
+    }
+    close(READ_FD);
 
     channels_finalize();
-    // fprintf(stderr, "MAIN %d: Exiting finalize\n", WORLD_RANK);
 }
 
 int MIMPI_World_size() { return WORLD_SIZE; }
@@ -531,31 +554,26 @@ MIMPI_Retcode MIMPI_Send(void const *data, int count, int destination, int tag) 
     } else if (PROGRAMS_ENDED[destination]) {
         return MIMPI_ERROR_REMOTE_FINISHED;
     } else {
-        // fprintf(stderr, "MAIN %d: Initializing send to %d with count %d and tag %d, through %d\n", WORLD_RANK,
-        // destination, count, tag, SEND_FDS[destination]);
-
         // Pierwszy chunk z danymi i countem, kolejne będą miały tylko source
         // In first data chunk, first 3*sizeof(int) bytes are used to store source, count and tag. Rest is for the data.
-        void* sendChunk = malloc(CHUNK_SIZE);
-        memset(sendChunk, 0, CHUNK_SIZE);
-
         memcpy(sendChunk, &WORLD_RANK, sizeof(int));
         memcpy(sendChunk + sizeof(int), &count, sizeof(int));
         memcpy(sendChunk + 2 * sizeof(int), &tag, sizeof(int));
-        memcpy(sendChunk + 3 * sizeof(int), data, CHUNK_SIZE - 3 * sizeof(int));
+        int toSend = count < CHUNK_SIZE - 3 * sizeof(int) ? count : CHUNK_SIZE - 3 * sizeof(int);
+        memcpy(sendChunk + 3 * sizeof(int), data, toSend);
 
         int sentByNow = 0;
 
         ssize_t wrote = chsend(SEND_FDS[destination], sendChunk, CHUNK_SIZE);
         ASSERT_SYS_OK(wrote);
         assert(wrote == 256);
-        sentByNow += (CHUNK_SIZE - 3 * sizeof(int));
-
-        // fprintf(stderr, "MAIN %d: Sent initial chunk\n", WORLD_RANK);
+        sentByNow += toSend;
 
         int counter = 0;
         while (sentByNow < count) {
             int toCopy = CHUNK_SIZE - sizeof(int) < count - sentByNow ? CHUNK_SIZE - sizeof(int) : count - sentByNow;
+            memset(sendChunk, 0, CHUNK_SIZE);
+            memcpy(sendChunk, &WORLD_RANK, sizeof(int));
             memcpy(sendChunk + sizeof(int), data + sentByNow, toCopy);
             ssize_t wrote = chsend(SEND_FDS[destination], sendChunk, CHUNK_SIZE);
             ASSERT_SYS_OK(wrote);
@@ -563,8 +581,6 @@ MIMPI_Retcode MIMPI_Send(void const *data, int count, int destination, int tag) 
             sentByNow += toCopy;
             counter++;
         }
-        free(sendChunk);
-        // fprintf(stderr, "MAIN %d: Sent all data\n", WORLD_RANK);
         return MIMPI_SUCCESS;
     }
 }
@@ -589,6 +605,12 @@ MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
             int res = MIMPI_Send(&deadlockMessage, sizeof(char), source, DEADLOCK_TAG);
             if (res == MIMPI_ERROR_REMOTE_FINISHED) {
                 ASSERT_ZERO(pthread_mutex_unlock(&bufferMutex));
+                if (found != NULL) {
+                    // fprintf(stderr, "HELPER %d: Free'd: S %d, C%d, T %d\n", WORLD_RANK, found->source, found->count, found->tag);
+                    free(found->data);
+                    free(found);
+                    found = NULL;
+                }
                 return MIMPI_ERROR_REMOTE_FINISHED;
             }
         } else if (!found) {
@@ -600,7 +622,19 @@ MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
                 int deadlockMessage = 8054;
                 int res = MIMPI_Send(&deadlockMessage, sizeof(int), source, DEADLOCK_TAG);
                 if (res == MIMPI_ERROR_REMOTE_FINISHED) {
+                    if (found != NULL) {
+                        // fprintf(stderr, "HELPER %d: Free'd: S %d, C%d, T %d\n", WORLD_RANK, found->source, found->count, found->tag);
+                        free(found->data);
+                        free(found);
+                        found = NULL;
+                    }
                     return MIMPI_ERROR_REMOTE_FINISHED;
+                }
+                if (found != NULL) {
+                    // fprintf(stderr, "HELPER %d: Free'd: S %d, C%d, T %d\n", WORLD_RANK, found->source, found->count, found->tag);
+                    free(found->data);
+                    free(found);
+                    found = NULL;
                 }
                 return MIMPI_ERROR_DEADLOCK_DETECTED;
             }
@@ -611,6 +645,12 @@ MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
     if (!found && PROGRAMS_ENDED[source]) {
         // fprintf(stderr, "MAIN %d: Source ended\n", WORLD_RANK);
         ASSERT_ZERO(pthread_mutex_unlock(&bufferMutex));
+        if (found != NULL) {
+            // fprintf(stderr, "HELPER %d: Free'd: S %d, C%d, T %d\n", WORLD_RANK, found->source, found->count, found->tag);
+            free(found->data);
+            free(found);
+            found = NULL;
+        }
         return MIMPI_ERROR_REMOTE_FINISHED;
     } else {
         if (!found) { // Jeszcze nie ma wiadomości dla nas, czekamy.
@@ -621,6 +661,12 @@ MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
             if (PROGRAMS_ENDED[source]) {
                 // fprintf(stderr, "MAIN %d: Remote ended\n", WORLD_RANK);
                 ASSERT_ZERO(pthread_mutex_unlock(&bufferMutex));
+                if (found != NULL) {
+                    // fprintf(stderr, "HELPER %d: Free'd: S %d, C%d, T %d\n", WORLD_RANK, found->source, found->count, found->tag);
+                    free(found->data);
+                    free(found);
+                    found = NULL;
+                }
                 return MIMPI_ERROR_REMOTE_FINISHED;
             }
 
@@ -658,21 +704,28 @@ MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
                 }
 
                 // fprintf(stderr, "MAIN %d:  DEADLOCK CRASH\n", WORLD_RANK);
+                if (found != NULL) {
+                    // fprintf(stderr, "HELPER %d: Free'd: S %d, C%d, T %d\n", WORLD_RANK, found->source, found->count, found->tag);
+                    free(found->data);
+                    free(found);
+                    found = NULL;
+                }
                 return MIMPI_ERROR_DEADLOCK_DETECTED;
             } else if (remoteMainWaitedForEnded &&
                        recieved) { // Source zakończył się w trakcie naszego czekania na niego.
                 // fprintf(stderr, "MAIN %d: Remote ended during our wating\n", WORLD_RANK);
                 if (DEADLOCK_DETECTION_ENABLED) {
-                    recvOnMe[source]--; // TODO: ptentially buggable
-                    // printRecvOnMe();
+                    recvOnMe[source]--;
+                }
+                if (found != NULL) {
+                    // fprintf(stderr, "HELPER %d: Free'd: S %d, C%d, T %d\n", WORLD_RANK, found->source, found->count, found->tag);
+                    free(found->data);
+                    free(found);
+                    found = NULL;
                 }
                 return MIMPI_ERROR_REMOTE_FINISHED;
             }
 
-            // if (source < WORLD_RANK && DEADLOCK_DETECTION_ENABLED) {
-            //     recvOnMe[source]--;
-            //     printRecvOnMe();
-            // }
             recieved = true; // cos z tym recieved moze byc nie tak
 
             // Jak się tu obudziliśmy to na pewno jest dla nas wiadomość.
@@ -692,7 +745,12 @@ MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
         // fprintf(stderr, "MAIN %d: Actually copying memory to target ptr\n", WORLD_RANK);
         memcpy(data, found->data, found->count);
 
-        free(found);
+        if (found != NULL) {
+            // fprintf(stderr, "HELPER %d: Free'd: S %d, C%d, T %d\n", WORLD_RANK, found->source, found->count, found->tag);
+            free(found->data);
+            free(found);
+            found = NULL;
+        }
         // fprintf(stderr, "MAIN %d: Leaving recv\n", WORLD_RANK);
         return MIMPI_SUCCESS;
     }
@@ -704,7 +762,7 @@ MIMPI_Retcode MIMPI_Barrier() {
     int res;
     if (treeRelations[WORLD_RANK][1] < WORLD_SIZE && treeRelations[WORLD_RANK][1] != -1) {
         // fprintf(stderr, "MAIN %d: Waiting for message from left son\n", WORLD_RANK);
-        res = MIMPI_Recv(&barrierMessage, sizeof(int), treeRelations[WORLD_RANK][1], BARRIER_TAG);
+        res = MIMPI_Recv(&barrierMessage, sizeof(barrierMessage), treeRelations[WORLD_RANK][1], BARRIER_TAG);
         // fprintf(stderr, "MAIN %d: Got message from left son\n", WORLD_RANK);
         if (res == MIMPI_ERROR_REMOTE_FINISHED) {
             return MIMPI_ERROR_REMOTE_FINISHED;
@@ -712,7 +770,7 @@ MIMPI_Retcode MIMPI_Barrier() {
     }
     if (treeRelations[WORLD_RANK][2] < WORLD_SIZE && treeRelations[WORLD_RANK][2] != -1) {
         // fprintf(stderr, "MAIN %d: Waiting for message from right son\n", WORLD_RANK);
-        res = MIMPI_Recv(&barrierMessage, sizeof(int), treeRelations[WORLD_RANK][2], BARRIER_TAG);
+        res = MIMPI_Recv(&barrierMessage, sizeof(barrierMessage), treeRelations[WORLD_RANK][2], BARRIER_TAG);
         // fprintf(stderr, "MAIN %d: Got message from right son\n", WORLD_RANK);
         if (res == MIMPI_ERROR_REMOTE_FINISHED) {
             return MIMPI_ERROR_REMOTE_FINISHED;
@@ -721,15 +779,14 @@ MIMPI_Retcode MIMPI_Barrier() {
 
     if (WORLD_RANK != 0) { // We send the message to our parent, then we wait for to parent to respond. After that
                            // we wake up out children
-        barrierMessage = 420;
         // fprintf(stderr, "MAIN %d: Sending message to our parent\n", WORLD_RANK);
-        res = MIMPI_Send(&barrierMessage, sizeof(int), treeRelations[WORLD_RANK][0], BARRIER_TAG);
+        res = MIMPI_Send(&barrierMessage, sizeof(barrierMessage), treeRelations[WORLD_RANK][0], BARRIER_TAG);
         if (res == MIMPI_ERROR_REMOTE_FINISHED) {
             return MIMPI_ERROR_REMOTE_FINISHED;
         }
 
         // fprintf(stderr, "MAIN %d: Waiting for message from our parent\n", WORLD_RANK);
-        res = MIMPI_Recv(&barrierMessage, sizeof(int), treeRelations[WORLD_RANK][0], BARRIER_TAG);
+        res = MIMPI_Recv(&barrierMessage, sizeof(barrierMessage), treeRelations[WORLD_RANK][0], BARRIER_TAG);
         // fprintf(stderr, "MAIN %d: Got message from our parent\n", WORLD_RANK);
         if (res == MIMPI_ERROR_REMOTE_FINISHED) {
             return MIMPI_ERROR_REMOTE_FINISHED;
@@ -737,14 +794,14 @@ MIMPI_Retcode MIMPI_Barrier() {
 
         if (treeRelations[WORLD_RANK][1] < WORLD_SIZE && treeRelations[WORLD_RANK][1] != -1) {
             // fprintf(stderr, "MAIN %d: Waking up left son\n", WORLD_RANK);
-            res = MIMPI_Send(&barrierMessage, sizeof(int), treeRelations[WORLD_RANK][1], BARRIER_TAG);
+            res = MIMPI_Send(&barrierMessage, sizeof(barrierMessage), treeRelations[WORLD_RANK][1], BARRIER_TAG);
             if (res == MIMPI_ERROR_REMOTE_FINISHED) {
                 return MIMPI_ERROR_REMOTE_FINISHED;
             }
         }
         if (treeRelations[WORLD_RANK][2] < WORLD_SIZE && treeRelations[WORLD_RANK][2] != -1) {
             // fprintf(stderr, "MAIN %d: Waking up right son\n", WORLD_RANK);
-            res = MIMPI_Send(&barrierMessage, sizeof(int), treeRelations[WORLD_RANK][2], BARRIER_TAG);
+            res = MIMPI_Send(&barrierMessage, sizeof(barrierMessage), treeRelations[WORLD_RANK][2], BARRIER_TAG);
             if (res == MIMPI_ERROR_REMOTE_FINISHED) {
                 return MIMPI_ERROR_REMOTE_FINISHED;
             }
@@ -753,14 +810,14 @@ MIMPI_Retcode MIMPI_Barrier() {
         // fprintf(stderr, "MAIN %d: ROOT GOT PINGED\n", WORLD_RANK);
         if (treeRelations[WORLD_RANK][1] < WORLD_SIZE && treeRelations[WORLD_RANK][1] != -1) {
             // fprintf(stderr, "MAIN %d: ROOT wakes up first child\n", WORLD_RANK);
-            res = MIMPI_Send(&barrierMessage, sizeof(int), treeRelations[WORLD_RANK][1], BARRIER_TAG);
+            res = MIMPI_Send(&barrierMessage, sizeof(barrierMessage), treeRelations[WORLD_RANK][1], BARRIER_TAG);
             if (res == MIMPI_ERROR_REMOTE_FINISHED) {
                 return MIMPI_ERROR_REMOTE_FINISHED;
             }
         }
         if (treeRelations[WORLD_RANK][2] < WORLD_SIZE && treeRelations[WORLD_RANK][2] != -1) {
             // fprintf(stderr, "MAIN %d: ROOT wakes up second child\n", WORLD_RANK);
-            res = MIMPI_Send(&barrierMessage, sizeof(int), treeRelations[WORLD_RANK][2], BARRIER_TAG);
+            res = MIMPI_Send(&barrierMessage, sizeof(barrierMessage), treeRelations[WORLD_RANK][2], BARRIER_TAG);
             if (res == MIMPI_ERROR_REMOTE_FINISHED) {
                 return MIMPI_ERROR_REMOTE_FINISHED;
             }
@@ -884,12 +941,15 @@ MIMPI_Retcode MIMPI_Bcast(void *data, int count, int root) {
 }
 
 MIMPI_Retcode MIMPI_Reduce(void const *send_data, void *recv_data, int count, MIMPI_Op op, int root) {
-    fprintf(stderr, "MAIN %d: Entered MIMPI_Reduce C%d R %d O %d\n", WORLD_RANK, count, root, op);
+    // fprintf(stderr, "MAIN %d: Entered MIMPI_Reduce C%d R %d O %d\n", WORLD_RANK, count, root, op);
     if (root < 0 || root > WORLD_SIZE - 1) {
         return MIMPI_ERROR_NO_SUCH_RANK;
     }
     void *leftSonMess = malloc(count);
     void *rightSonMess = malloc(count);
+    memset(leftSonMess, 0, count);
+    memset(rightSonMess, 0, count);
+    
     int reduceMessage = 420;
     int res;
     bool rootChange = (root != 0);
@@ -916,32 +976,36 @@ MIMPI_Retcode MIMPI_Reduce(void const *send_data, void *recv_data, int count, MI
         rightSon = 0;
     }
 
-    fprintf(stderr, "MAIN %d: Got index %d\n", WORLD_RANK, myIx);
+    // fprintf(stderr, "MAIN %d: Got index %d\n", WORLD_RANK, myIx);
     if (leftSon < WORLD_SIZE && leftSon != -1) {
-        fprintf(stderr, "MAIN %d INDEX %d: Waiting for message from left son %d\n", WORLD_RANK, myIx, leftSon);
+        // fprintf(stderr, "MAIN %d INDEX %d: Waiting for message from left son %d\n", WORLD_RANK, myIx, leftSon);
         leftExists = true;
         res = MIMPI_Recv(leftSonMess, count, leftSon, REDUCE_TAG);
-        fprintf(stderr, "MAIN %d INDEX %d: Got message from left son\n", WORLD_RANK, myIx);
+        // fprintf(stderr, "MAIN %d INDEX %d: Got message from left son\n", WORLD_RANK, myIx);
         if (res == MIMPI_ERROR_REMOTE_FINISHED) {
+            free(rightSonMess);
+            free(leftSonMess);
             return MIMPI_ERROR_REMOTE_FINISHED;
         }
     }
     if (rightSon < WORLD_SIZE && rightSon != -1) {
-        fprintf(stderr, "MAIN %d INDEX %d: Waiting for message from right son %d\n", WORLD_RANK, myIx, rightSon);
+        // fprintf(stderr, "MAIN %d INDEX %d: Waiting for message from right son %d\n", WORLD_RANK, myIx, rightSon);
         rightExists = true;
         res = MIMPI_Recv(rightSonMess, count, rightSon, REDUCE_TAG);
-        fprintf(stderr, "MAIN %d INDEX %d: Got message from right son\n", WORLD_RANK, myIx);
+        // fprintf(stderr, "MAIN %d INDEX %d: Got message from right son\n", WORLD_RANK, myIx);
         if (res == MIMPI_ERROR_REMOTE_FINISHED) {
+            free(rightSonMess);
+            free(leftSonMess);
             return MIMPI_ERROR_REMOTE_FINISHED;
         }
     }
 
     if (leftExists && rightExists) {
-        fprintf(stderr, "MAIN %d INDEX %d: Triple reduce\n", WORLD_RANK, myIx);
+        // fprintf(stderr, "MAIN %d INDEX %d: Triple reduce\n", WORLD_RANK, myIx);
         int reduceRes = reduceTriple(leftSonMess, rightSonMess, send_data, count, op);
         assert(reduceRes == 0);
     } else if (leftExists) {
-        fprintf(stderr, "MAIN %d INDEX %d: Double reduce\n", WORLD_RANK, myIx);
+        // fprintf(stderr, "MAIN %d INDEX %d: Double reduce\n", WORLD_RANK, myIx);
         int reduceRes = reduceDouble(leftSonMess, send_data, count, op);
         assert(reduceRes == 0);
     }
@@ -949,7 +1013,7 @@ MIMPI_Retcode MIMPI_Reduce(void const *send_data, void *recv_data, int count, MI
 
     // After that the reduced message is in leftSonMess
     if (WORLD_RANK == root) {
-        fprintf(stderr, "MAIN %d INDEX %d: ROOT copies the data to recv_data\n", WORLD_RANK, myIx);
+        // fprintf(stderr, "MAIN %d INDEX %d: ROOT copies the data to recv_data\n", WORLD_RANK, myIx);
         memcpy(recv_data, leftSonMess, count);
 
     } else {
@@ -964,40 +1028,44 @@ MIMPI_Retcode MIMPI_Reduce(void const *send_data, void *recv_data, int count, MI
 
         // Sending reduced message to out parents
         if (!leftExists && !rightExists) {
-            fprintf(stderr, "MAIN %d INDEX %d: IM A LEAF Sending message to parent %d\n", WORLD_RANK, myIx,
-            parent);
+            // fprintf(stderr, "MAIN %d INDEX %d: IM A LEAF Sending message to parent %d\n", WORLD_RANK, myIx, parent);
             res = MIMPI_Send(send_data, count, parent, REDUCE_TAG);
         } else {
-            fprintf(stderr, "MAIN %d INDEX %d: Sending message to parent %d\n", WORLD_RANK, myIx, parent);
+            // fprintf(stderr, "MAIN %d INDEX %d: Sending message to parent %d\n", WORLD_RANK, myIx, parent);
             res = MIMPI_Send(leftSonMess, count, parent, REDUCE_TAG);
         }
         if (res == MIMPI_ERROR_REMOTE_FINISHED) {
+            free(leftSonMess);
             return MIMPI_ERROR_REMOTE_FINISHED;
         }
 
         // Waiting for message from our parent
         res = MIMPI_Recv(&reduceMessage, sizeof(int), parent, REDUCE_TAG);
         if (res == MIMPI_ERROR_REMOTE_FINISHED) {
+            free(leftSonMess);
             return MIMPI_ERROR_REMOTE_FINISHED;
         }
     }
     // We're ready to leave. Sending message to sons.
     if (leftExists) {
-        fprintf(stderr, "MAIN %d INDEX %d: Sending message to our left son %d\n", WORLD_RANK, myIx, leftSon);
+        // fprintf(stderr, "MAIN %d INDEX %d: Sending message to our left son %d\n", WORLD_RANK, myIx, leftSon);
         res = MIMPI_Send(&reduceMessage, sizeof(int), leftSon, REDUCE_TAG);
         if (res == MIMPI_ERROR_REMOTE_FINISHED) {
+            free(leftSonMess);
             return MIMPI_ERROR_REMOTE_FINISHED;
         }
     }
     if (rightExists) {
-        fprintf(stderr, "MAIN %d INDEX %d: Sending message to our right son %d\n", WORLD_RANK, myIx, rightSon);
+        // fprintf(stderr, "MAIN %d INDEX %d: Sending message to our right son %d\n", WORLD_RANK, myIx, rightSon);
         rightExists = true;
         res = MIMPI_Send(&reduceMessage, sizeof(int), rightSon, REDUCE_TAG);
         if (res == MIMPI_ERROR_REMOTE_FINISHED) {
+            free(leftSonMess);
             return MIMPI_ERROR_REMOTE_FINISHED;
         }
     }
-    fprintf(stderr, "MAIN %d INDEX %d: Leaving reduce\n", WORLD_RANK, myIx);
+    // fprintf(stderr, "MAIN %d INDEX %d: Leaving reduce\n", WORLD_RANK, myIx);
 
+    free(leftSonMess);
     return MIMPI_SUCCESS;
 }

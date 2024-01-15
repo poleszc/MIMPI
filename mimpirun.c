@@ -83,13 +83,6 @@ int main(int argc, char *argv[]) {
             snprintf(readDesc, sizeof(readDesc), "%d", channels[i][0]);
             setenv(CHANNEL_READ_ENV, readDesc, 1);
 
-            // for (int j = 0; j < n; j++) {
-            //     if (i != j) {
-            //         fprintf(stderr, "Closing fd: %d\n", channels[j][0]);
-            //         ASSERT_SYS_OK(close(channels[j][0]));
-            //     }
-            // }
-
             for (int j = 0; j < n; j++) {
                 char writeDescEnv[32];
                 snprintf(writeDescEnv, sizeof(writeDescEnv), "MIMPI_CHANNEL_WRITE_%d", j);
@@ -97,6 +90,15 @@ int main(int argc, char *argv[]) {
                 char writeDesc[4];
                 snprintf(writeDesc, sizeof(writeDesc), "%d", channels[j][1]);
                 setenv(writeDescEnv, writeDesc, 1);
+            }
+
+            for (int j = 0; j < n; j++) {
+                char readDescEnv[32];
+                snprintf(readDescEnv, sizeof(readDescEnv), "MIMPI_CHANNEL_READ_%d", j);
+
+                char readDesc[4];
+                snprintf(readDesc, sizeof(readDesc), "%d", channels[j][0]);
+                setenv(readDescEnv, readDesc, 1);
             }
 
             ASSERT_SYS_OK(execvp(prog, args));
