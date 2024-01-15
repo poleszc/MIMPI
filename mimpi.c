@@ -300,9 +300,12 @@ void *helperThreadMain() {
         // fprintf(stderr, "HELPER %d:  Waiting on chrecv\n", WORLD_RANK);
 
         // We always recieve 256 byte blocks, although they are not always filled with data
-        ssize_t read = chrecv(READ_FD, helperChunk, CHUNK_SIZE);
-        ASSERT_SYS_OK(read);
-        assert(read == 256);
+        int actuallyRead = 0;
+        while (actuallyRead < CHUNK_SIZE) {
+            ssize_t read = chrecv(READ_FD, helperChunk + actuallyRead, CHUNK_SIZE);
+            ASSERT_SYS_OK(read);
+            actuallyRead += read;
+        }
         // fprintf(stderr, "HELPER %d:  Woke up from chrecv. Read %ld bytes\n", WORLD_RANK, read);
 
         if (DEADLOCK_DETECTION_ENABLED) {
@@ -384,7 +387,8 @@ void *helperThreadMain() {
             bufferData->data = malloc(bufferData->count);
             ASSERT_NOT_NULL(bufferData->data);
             memset(bufferData->data, 0, bufferData->count);
-            // fprintf(stderr, "HELPER %d: Alloced buff: S %d, C%d, T %d\n", WORLD_RANK, bufferData->source, bufferData->count, bufferData->tag);
+            // fprintf(stderr, "HELPER %d: Alloced buff: S %d, C%d, T %d\n", WORLD_RANK, bufferData->source,
+            // bufferData->count, bufferData->tag);
 
             int copySize = count < CHUNK_SIZE - 3 * sizeof(int) ? count : CHUNK_SIZE - 3 * sizeof(int);
             memcpy(bufferData->data, helperChunk + 3 * sizeof(int), copySize);
@@ -559,27 +563,31 @@ MIMPI_Retcode MIMPI_Send(void const *data, int count, int destination, int tag) 
         memcpy(sendChunk, &WORLD_RANK, sizeof(int));
         memcpy(sendChunk + sizeof(int), &count, sizeof(int));
         memcpy(sendChunk + 2 * sizeof(int), &tag, sizeof(int));
-        int toSend = count < CHUNK_SIZE - 3 * sizeof(int) ? count : CHUNK_SIZE - 3 * sizeof(int);
-        memcpy(sendChunk + 3 * sizeof(int), data, toSend);
+        int toCopy = count < CHUNK_SIZE - 3 * sizeof(int) ? count : CHUNK_SIZE - 3 * sizeof(int);
+        memcpy(sendChunk + 3 * sizeof(int), data, toCopy);
 
-        int sentByNow = 0;
+        int sentByNow = toCopy;
+        int actuallySent = 0;
+        while (actuallySent < CHUNK_SIZE) {
+            ssize_t wrote = chsend(SEND_FDS[destination], sendChunk + actuallySent, CHUNK_SIZE);
+            ASSERT_SYS_OK(wrote);
+            actuallySent += wrote;
+        }
 
-        ssize_t wrote = chsend(SEND_FDS[destination], sendChunk, CHUNK_SIZE);
-        ASSERT_SYS_OK(wrote);
-        assert(wrote == 256);
-        sentByNow += toSend;
-
-        int counter = 0;
         while (sentByNow < count) {
             int toCopy = CHUNK_SIZE - sizeof(int) < count - sentByNow ? CHUNK_SIZE - sizeof(int) : count - sentByNow;
             memset(sendChunk, 0, CHUNK_SIZE);
             memcpy(sendChunk, &WORLD_RANK, sizeof(int));
             memcpy(sendChunk + sizeof(int), data + sentByNow, toCopy);
-            ssize_t wrote = chsend(SEND_FDS[destination], sendChunk, CHUNK_SIZE);
-            ASSERT_SYS_OK(wrote);
-            assert(wrote == 256);
+
+            actuallySent = 0;
+            while (actuallySent < CHUNK_SIZE) {
+                ssize_t wrote = chsend(SEND_FDS[destination], sendChunk, CHUNK_SIZE);
+                ASSERT_SYS_OK(wrote);
+                actuallySent += wrote;
+            }
+
             sentByNow += toCopy;
-            counter++;
         }
         return MIMPI_SUCCESS;
     }
@@ -606,7 +614,6 @@ MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
             if (res == MIMPI_ERROR_REMOTE_FINISHED) {
                 ASSERT_ZERO(pthread_mutex_unlock(&bufferMutex));
                 if (found != NULL) {
-                    // fprintf(stderr, "HELPER %d: Free'd: S %d, C%d, T %d\n", WORLD_RANK, found->source, found->count, found->tag);
                     free(found->data);
                     free(found);
                     found = NULL;
@@ -623,7 +630,8 @@ MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
                 int res = MIMPI_Send(&deadlockMessage, sizeof(int), source, DEADLOCK_TAG);
                 if (res == MIMPI_ERROR_REMOTE_FINISHED) {
                     if (found != NULL) {
-                        // fprintf(stderr, "HELPER %d: Free'd: S %d, C%d, T %d\n", WORLD_RANK, found->source, found->count, found->tag);
+                        // fprintf(stderr, "HELPER %d: Free'd: S %d, C%d, T %d\n", WORLD_RANK, found->source,
+                        // found->count, found->tag);
                         free(found->data);
                         free(found);
                         found = NULL;
@@ -631,7 +639,8 @@ MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
                     return MIMPI_ERROR_REMOTE_FINISHED;
                 }
                 if (found != NULL) {
-                    // fprintf(stderr, "HELPER %d: Free'd: S %d, C%d, T %d\n", WORLD_RANK, found->source, found->count, found->tag);
+                    // fprintf(stderr, "HELPER %d: Free'd: S %d, C%d, T %d\n", WORLD_RANK, found->source, found->count,
+                    // found->tag);
                     free(found->data);
                     free(found);
                     found = NULL;
@@ -640,13 +649,11 @@ MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
             }
         }
     }
-    // fprintf(stderr, "MAIN %d: Got through deadlock block\n", WORLD_RANK);
 
     if (!found && PROGRAMS_ENDED[source]) {
         // fprintf(stderr, "MAIN %d: Source ended\n", WORLD_RANK);
         ASSERT_ZERO(pthread_mutex_unlock(&bufferMutex));
         if (found != NULL) {
-            // fprintf(stderr, "HELPER %d: Free'd: S %d, C%d, T %d\n", WORLD_RANK, found->source, found->count, found->tag);
             free(found->data);
             free(found);
             found = NULL;
@@ -662,7 +669,6 @@ MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
                 // fprintf(stderr, "MAIN %d: Remote ended\n", WORLD_RANK);
                 ASSERT_ZERO(pthread_mutex_unlock(&bufferMutex));
                 if (found != NULL) {
-                    // fprintf(stderr, "HELPER %d: Free'd: S %d, C%d, T %d\n", WORLD_RANK, found->source, found->count, found->tag);
                     free(found->data);
                     free(found);
                     found = NULL;
@@ -675,24 +681,21 @@ MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
             countIWaitFor = count;
             sourceIWaitFor = source;
             ASSERT_ZERO(pthread_mutex_unlock(&bufferMutex));
-            // fprintf(stderr, "MAIN %d: I hang myself, waiting for: S %d, C %d, T %d\n", WORLD_RANK, source, count,
-            // tag);
+            // fprintf(stderr, "MAIN %d: I hang myself, for: S %d, C %d, T %d\n", WORLD_RANK, source, count, tag);
             ASSERT_SYS_OK(sem_wait(&mainThreadStopper));
-
             // fprintf(stderr, "MAIN %d: Woke up from hanging\n", WORLD_RANK);
 
             sourceIWaitFor = NOWAIT_TAG;
             tagIWaitFor = NOWAIT_TAG;
             countIWaitFor = NOWAIT_TAG;
 
-            if (recieved && DEADLOCK_DETECTION_ENABLED &&
-                deadlockDetected) { // We woke up because a deadlock was detected
-                // We let the other procces know if it has a smaller index.
+            // We woke up because a deadlock was detected
+            if (recieved && DEADLOCK_DETECTION_ENABLED && deadlockDetected) {
                 // fprintf(stderr, "MAIN %d:  Woke up beacuse of deadlock\n", WORLD_RANK);
+
+                // We let the other procces know if it has a smaller index.
                 deadlockDetected = false;
-                recvOnMe[source]--; // TODO: That may be a farmazon.
-                // printRecvOnMe();
-                // if (source <  WORLD_RANK) { // If we were bigger of the two
+                recvOnMe[source]--;
                 if (!secondDeadlocked) { // So we wake up the partner only once
                     int tempMessage = -2;
                     // fprintf(stderr, "MAIN %d:  Let now source %d that deadlock occured\n", WORLD_RANK, source);
@@ -705,20 +708,19 @@ MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
 
                 // fprintf(stderr, "MAIN %d:  DEADLOCK CRASH\n", WORLD_RANK);
                 if (found != NULL) {
-                    // fprintf(stderr, "HELPER %d: Free'd: S %d, C%d, T %d\n", WORLD_RANK, found->source, found->count, found->tag);
+                    // fprintf(stderr, "HELPER %d: Free'd: S %d, C%d, T %d\n", WORLD_RANK, found->source, found->count,
+                    // found->tag);
                     free(found->data);
                     free(found);
                     found = NULL;
                 }
                 return MIMPI_ERROR_DEADLOCK_DETECTED;
-            } else if (remoteMainWaitedForEnded &&
-                       recieved) { // Source zakończył się w trakcie naszego czekania na niego.
+            } else if (remoteMainWaitedForEnded && recieved) { // Source ended during our wating
                 // fprintf(stderr, "MAIN %d: Remote ended during our wating\n", WORLD_RANK);
                 if (DEADLOCK_DETECTION_ENABLED) {
                     recvOnMe[source]--;
                 }
                 if (found != NULL) {
-                    // fprintf(stderr, "HELPER %d: Free'd: S %d, C%d, T %d\n", WORLD_RANK, found->source, found->count, found->tag);
                     free(found->data);
                     free(found);
                     found = NULL;
@@ -726,11 +728,8 @@ MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
                 return MIMPI_ERROR_REMOTE_FINISHED;
             }
 
-            recieved = true; // cos z tym recieved moze byc nie tak
-
-            // Jak się tu obudziliśmy to na pewno jest dla nas wiadomość.
-            // Oznaczmy ze nikt nie czeka, zeby pomocniczy wiedział i nie
-            // musiał sprawdzac mutexa
+            // If we got here, our message is waiting in found.
+            recieved = true;
             found = justRecieved;
             justRecieved = NULL;
             ASSERT_NOT_NULL(found);
@@ -746,12 +745,10 @@ MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
         memcpy(data, found->data, found->count);
 
         if (found != NULL) {
-            // fprintf(stderr, "HELPER %d: Free'd: S %d, C%d, T %d\n", WORLD_RANK, found->source, found->count, found->tag);
             free(found->data);
             free(found);
             found = NULL;
         }
-        // fprintf(stderr, "MAIN %d: Leaving recv\n", WORLD_RANK);
         return MIMPI_SUCCESS;
     }
 }
@@ -949,7 +946,7 @@ MIMPI_Retcode MIMPI_Reduce(void const *send_data, void *recv_data, int count, MI
     void *rightSonMess = malloc(count);
     memset(leftSonMess, 0, count);
     memset(rightSonMess, 0, count);
-    
+
     int reduceMessage = 420;
     int res;
     bool rootChange = (root != 0);

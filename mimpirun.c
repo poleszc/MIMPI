@@ -15,12 +15,6 @@
 #define WORLD_RANK_ENV "MIMPI_WORLD_RANK"
 #define CHANNEL_READ_ENV "MIMPI_CHANNEL_READ"
 
-// Jeżeli wywołujemy MIMPI_Recv będąc procesem o mniejszym indeksie niż ten do którego wysyłamy
-// To prosimy go o pozwolenie. Tj. wysyłamy mu wiadomość, że chcemy na niego wywołać recv. Jeżeli on ma zapisane
-// w tablicy ze juz ma wywołane na nas recv to budzi swojego zeby sie wywalił oraz odsyła wiadomosc ze nie mozna
-// i masz zwrocić bład. Jeżeli wiekszy nie wywołał recv na tamten to odsyła ze spoko i wtedy zaznacza sobie ze
-// zostało na niego wywołąne recv wiec jak on teraz wywoła recv to wie ze ma sie wywalić.
-
 int main(int argc, char *argv[]) {
     if (argc < 3) {
         fprintf(stderr, "Not enough arguments!\n");
