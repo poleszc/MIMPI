@@ -186,7 +186,7 @@ int READ_FD;
 int READ_FDS[MAX_PROCESSES];
 // Messages being recieved from channel + their size/tag
 initialDataChunk *MESSAGES_IN_BUILD[MAX_PROCESSES];
-int BYTES_READ_BY_NOW[MAX_PROCESSES];
+long long BYTES_READ_BY_NOW[MAX_PROCESSES];
 // Helper thread data
 pthread_t helperThread;
 // Buffer for messages from i-th program.
@@ -291,7 +291,7 @@ int reduceDouble(uint8_t *left, const uint8_t *father, int count, MIMPI_Op op) {
 void *helperThreadMain() {
     while (helperThreadActive) {
         // We always recieve 256 byte blocks, although they are not always filled with data
-        int actuallyRead = 0;
+        long long actuallyRead = 0;
         while (actuallyRead < CHUNK_SIZE) {
             ssize_t read = chrecv(READ_FD, helperChunk + actuallyRead, CHUNK_SIZE);
             ASSERT_SYS_OK(read);
@@ -527,7 +527,7 @@ MIMPI_Retcode MIMPI_Send(void const *data, int count, int destination, int tag) 
         int toCopy = count < CHUNK_SIZE - 3 * sizeof(int) ? count : CHUNK_SIZE - 3 * sizeof(int);
         memcpy(sendChunk + 3 * sizeof(int), data, toCopy);
 
-        int sentByNow = toCopy;
+        long long sentByNow = toCopy;
         int actuallySent = 0;
         while (actuallySent < CHUNK_SIZE) {
             ssize_t wrote = chsend(SEND_FDS[destination], sendChunk + actuallySent, CHUNK_SIZE);
